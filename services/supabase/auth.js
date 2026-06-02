@@ -1,5 +1,6 @@
 import { supabase } from './client';
-import { getProfileById, normalizeProfile } from './data';
+import { getProfileById, normalizeProfile, upsertProfile } from './data';
+import * as Linking from 'expo-linking';
 
 let currentUser = null;
 const listeners = new Set();
@@ -47,6 +48,10 @@ export const auth = {
   },
   signOut,
   reload,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  requestEmailOtp,
+  verifyEmailOtp,
 };
 
 export async function initializeAuth() {
@@ -55,8 +60,8 @@ export async function initializeAuth() {
     initPromise = supabase.auth.getSession().then(async ({ data }) => {
       initialized = true;
       await setCurrentUserFromSession(data.session);
-      supabase.auth.onAuthStateChange(async (_event, session) => {
-        await setCurrentUserFromSession(session);
+      supabase.auth.onAuthStateChange((_event, session) => {
+        void setCurrentUserFromSession(session);
       });
       return currentUser;
     });
@@ -64,28 +69,142 @@ export async function initializeAuth() {
   return initPromise;
 }
 
-export async function signInWithEmailAndPassword(_auth, email, password) {
-  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-  if (error) throw error;
-  await setCurrentUserFromSession(data.session);
-  return { user: mapSupabaseUser(data.user, await getProfileById(data.user.id).catch(() => null)) };
-}
+export async function requestEmailOtp(email) {
+  const normalizedEmail = String(email || '').trim();
+  if (!normalizedEmail) {
+    throw new Error('Email is required.');
+  }
 
-export async function createUserWithEmailAndPassword(_auth, email, password) {
-  const { data, error } = await supabase.auth.signUp({
-    email,
-    password,
+  const { data, error } = await supabase.auth.signInWithOtp({
+    email: normalizedEmail,
     options: {
-      emailRedirectTo: process.env.EXPO_PUBLIC_SUPABASE_EMAIL_REDIRECT_TO || undefined,
+      shouldCreateUser: true,
+      emailRedirectTo: Linking.createURL('/'),
     },
   });
 
   if (error) throw error;
 
+  return data;
+}
+
+export async function signInWithEmailAndPassword(_auth, email, password) {
+  const normalizedEmail = String(email || '').trim();
+  const normalizedPassword = String(password || '');
+
+  if (!normalizedEmail) {
+    throw new Error('Email is required.');
+  }
+
+  if (!normalizedPassword) {
+    throw new Error('Password is required.');
+  }
+
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email: normalizedEmail,
+    password: normalizedPassword,
+  });
+
+  if (error) throw error;
+
+  await setCurrentUserFromSession(data.session);
+
   return {
-    user: mapSupabaseUser(data.user, await getProfileById(data.user?.id).catch(() => null)),
+    user: mapSupabaseUser(
+      data.user,
+      await getProfileById(data.user.id).catch(() => null)
+    ),
     session: data.session,
   };
+}
+
+
+
+export async function createUserWithEmailAndPassword(_, email, password) {
+  const normalizedEmail = String(email || '').trim();
+  const normalizedPassword = String(password || '');
+
+  if (!normalizedEmail) {
+    throw new Error('Email is required.');
+  }
+
+  if (!normalizedPassword) {
+    throw new Error('Password is required.');
+  }
+
+  const { data, error } = await supabase.auth.signUp({
+    email: normalizedEmail,
+    password: normalizedPassword,
+  });
+
+  if (error) throw error;
+
+  if (data?.session) {
+    await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+    await setCurrentUserFromSession(null);
+  }
+
+  return {
+    user: mapSupabaseUser(data.user, await getProfileById(data.user?.id).catch(() => null)),
+    session: data.session || null,
+  };
+}
+
+
+
+
+
+
+export async function verifyEmailOtp(email, token) {
+  const normalizedEmail = String(email || '').trim();
+  const normalizedToken = String(token || '').trim();
+
+  if (!normalizedEmail) {
+    throw new Error('Email is required.');
+  }
+
+  if (!normalizedToken) {
+    throw new Error('Verification code is required.');
+  }
+
+  const { data, error } = await supabase.auth.verifyOtp({
+    email: normalizedEmail,
+    token: normalizedToken,
+    type: 'email',
+  });
+
+  if (error) throw error;
+  if (!data?.session?.user) {
+    throw new Error('Verification succeeded, but no session was returned.');
+  }
+
+  await setCurrentUserFromSession(data.session);
+
+  return {
+    user: mapSupabaseUser(
+      data.user || data.session.user,
+      await getProfileById(data.session.user.id).catch(() => null)
+    ),
+    session: data.session,
+  };
+}
+
+export async function ensureProfileForUser(user) {
+  if (!user?.id || !user?.email) return null;
+
+  const existingProfile = await getProfileById(user.id).catch(() => null);
+  if (existingProfile) return existingProfile;
+
+  return upsertProfile({
+    id: user.id,
+    email: user.email,
+    name: user.email.split('@')[0],
+    profilePhoto: null,
+    bio: '',
+    following: [],
+    followers: [],
+    searchHistory: [],
+  });
 }
 
 export async function signOut() {
@@ -93,15 +212,6 @@ export async function signOut() {
   if (error) throw error;
   currentUser = null;
   broadcast();
-}
-
-export async function sendEmailVerification(user) {
-  if (!user?.email) return;
-  const { error } = await supabase.auth.resend({
-    type: 'signup',
-    email: user.email,
-  });
-  if (error) throw error;
 }
 
 export async function reload() {

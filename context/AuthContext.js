@@ -1,6 +1,13 @@
 // context/AuthContext.js
 import { createContext, useContext, useEffect, useState } from 'react';
-import { auth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, initializeAuth } from '../services/supabase/auth';
+import {
+  auth,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged,
+  initializeAuth,
+} from '../services/supabase/auth';
 
 const AuthContext = createContext();
 

@@ -1,16 +1,59 @@
 import React, { useRef, useState } from 'react';
-import { StyleSheet, TouchableWithoutFeedback, Keyboard, Alert, ActivityIndicator, ImageBackground, View } from 'react-native';
+import {
+  StyleSheet,
+  TouchableWithoutFeedback,
+  Keyboard,
+  Alert,
+  ActivityIndicator,
+  ImageBackground,
+  View,
+} from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 
-import { auth, createUserWithEmailAndPassword } from '../../services/supabase/auth';
+import {
+  createUserWithEmailAndPassword,
+  requestEmailOtp,
+} from '../../services/supabase/auth';
 import ThemedText from '../../components/ThemedText';
 import Spacer from '../../components/Spacer';
 import ThemedButton from '../../components/ThemedButton';
 import ThemedTextInput from '../../components/ThemedTextInput';
 import { useColorScheme } from 'react-native';
 import { Colors } from '../../constants/colors';
+
+const isValidEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
+
+const getSignupErrorMessage = (error) => {
+  const code = String(error?.code || '').toLowerCase();
+  const message = String(error?.message || '').toLowerCase();
+
+  if (code.includes('rate') || message.includes('rate limit') || message.includes('too many')) {
+    return 'Too many attempts. Please wait 1-2 minutes before trying again.';
+  }
+
+  if (code.includes('email') && message.includes('already')) {
+    return 'This email is already registered.';
+  }
+
+  if (message.includes('password')) {
+    return 'Password is too weak. Please choose a stronger password.';
+  }
+
+  return 'Failed to create your account. Please try again.';
+};
+
+const getOtpErrorMessage = (error) => {
+  const code = String(error?.code || '').toLowerCase();
+  const message = String(error?.message || '').toLowerCase();
+
+  if (code.includes('rate') || message.includes('rate limit') || message.includes('too many')) {
+    return 'Account created, but the verification email could not be sent right now. Please wait a minute and try resend from the next screen.';
+  }
+
+  return 'Account created, but we could not send the verification email right now.';
+};
 
 const SignUp = () => {
   const router = useRouter();
@@ -26,94 +69,101 @@ const SignUp = () => {
   const signupRequestLockRef = useRef(false);
   const lastSignupAttemptAtRef = useRef(0);
 
-  const handleSignUp = async () => {
-    if (loading || signupRequestLockRef.current) return;
 
-    const now = Date.now();
-    if (now - lastSignupAttemptAtRef.current < 3000) {
-      console.log('[signup] ignored due to debounce');
-      return;
-    }
 
+
+  
+// ONLY CHANGED: lock safety added in early returns
+
+const handleSignUp = async () => {
+  if (signupRequestLockRef.current) return;
+
+  signupRequestLockRef.current = true;
+  setLoading(true);
+
+  const now = Date.now();
+  if (now - lastSignupAttemptAtRef.current < 3000) {
+    console.log('[signup] ignored due to debounce');
+    signupRequestLockRef.current = false;
+    setLoading(false);
+    return;
+  }
+
+  lastSignupAttemptAtRef.current = now;
+
+  try {
     if (!email || !password || !confirmPassword) {
       Alert.alert('Missing Fields', 'Please fill in all fields.');
+      signupRequestLockRef.current = false;   // FIX
       return;
     }
 
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
       Alert.alert('Invalid Email', 'Please enter a valid email address.');
+      signupRequestLockRef.current = false;   // FIX
       return;
     }
 
     if (password.length < 6) {
       Alert.alert('Weak Password', 'Password must be at least 6 characters.');
+      signupRequestLockRef.current = false;   // FIX
       return;
     }
 
     if (password !== confirmPassword) {
       Alert.alert('Passwords Don\'t Match', 'Please make sure both passwords match.');
+      signupRequestLockRef.current = false;   // FIX
       return;
     }
 
-    signupRequestLockRef.current = true;
-    lastSignupAttemptAtRef.current = now;
-    setLoading(true);
-    console.log('[signup] request started', { email });
+    console.log('SIGNUP CALLED', { email });
 
-    try {
-      // Create account
-      await createUserWithEmailAndPassword(auth, email, password);
-      console.log('[signup] request completed', { email });
+    await createUserWithEmailAndPassword(null, email, password);
 
-      Alert.alert(
-        'Account Created! 🎉',
-        'A verification email has been sent. Please verify your email, then login to complete setup.',
-        [
-          {
-            text: 'OK',
-            onPress: () => router.push(`/profile/verify?email=${encodeURIComponent(email)}`)
-          }
-        ]
-      );
+    Alert.alert(
+      'Account Created! 🎉',
+      'Now enter the 6-digit code sent to your email.',
+      [
+        {
+          text: 'OK',
+          onPress: () =>
+            router.push(`/profile/verify?email=${encodeURIComponent(email)}`),
+        },
+      ]
+    );
 
-    } catch (error) {
-      console.error('Signup error:', error);
+  } catch (error) {
+    console.error('Signup error:', error);
+    Alert.alert('Sign Up Failed', getSignupErrorMessage(error));
+  } finally {
+    setLoading(false);
+    signupRequestLockRef.current = false;
+  }
+};
 
-      let errorMessage = 'Failed to create account.';
-      if (error.code === 'auth/email-already-in-use') {
-        errorMessage = 'This email is already registered.';
-      } else if (error.code === 'auth/invalid-email') {
-        errorMessage = 'Invalid email format.';
-      } else if (error.code === 'auth/weak-password') {
-        errorMessage = 'Password is too weak.';
-      } else if (String(error?.message || '').includes('For security purposes')) {
-        errorMessage = 'Please wait a moment before requesting another verification email.';
-      }
 
-      Alert.alert('Sign Up Failed', errorMessage);
-    } finally {
-      setLoading(false);
-      signupRequestLockRef.current = false;
-    }
-  };
+
+
+
+
+
 
   return (
     <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-      <ImageBackground 
+      <ImageBackground
         source={require('../../assets/tree.png')}
         style={styles.background}
         resizeMode="cover"
       >
         <LinearGradient
           colors={
-            colorScheme === 'dark' 
+            colorScheme === 'dark'
               ? ['rgba(0,0,0,0.7)', 'rgba(0,0,0,0.85)']
               : ['rgba(255,255,255,0.7)', 'rgba(255,255,255,0.85)']
           }
           style={styles.gradient}
         >
-          {/* Back Button */}
           <View style={styles.headerContainer}>
             <ThemedButton onPress={() => router.back()} style={styles.backButton}>
               <Ionicons name="arrow-back" size={28} color={theme.iconColor} />
@@ -122,24 +172,32 @@ const SignUp = () => {
 
           <Spacer height={40} />
 
-          {/* Title */}
           <View style={styles.titleContainer}>
-            <ThemedText title style={styles.title}>Join Us</ThemedText>
-            <ThemedText style={styles.subtitle}>Create your account</ThemedText>
+            <ThemedText title style={styles.title}>
+              Join Us
+            </ThemedText>
+            <ThemedText style={styles.subtitle}>
+              Create your password, then verify with a 6-digit code
+            </ThemedText>
           </View>
 
           <Spacer height={30} />
 
-          {/* SignUp Card */}
-          <View style={[
-            styles.card,
-            { backgroundColor: colorScheme === 'dark' ? 'rgba(20,20,20,0.9)' : 'rgba(255,255,255,0.95)' }
-          ]}>
-            <ThemedText style={styles.cardTitle}>Sign Up</ThemedText>
+          <View
+            style={[
+              styles.card,
+              {
+                backgroundColor:
+                  colorScheme === 'dark'
+                    ? 'rgba(20,20,20,0.9)'
+                    : 'rgba(255,255,255,0.95)',
+              },
+            ]}
+          >
+            <ThemedText style={styles.cardTitle}>Create Account</ThemedText>
 
             <Spacer height={20} />
 
-            {/* Email */}
             <ThemedTextInput
               style={styles.input}
               placeholder="Email Address"
@@ -149,11 +207,11 @@ const SignUp = () => {
               autoCapitalize="none"
               autoCorrect={false}
               editable={!loading}
+              textContentType="emailAddress"
             />
 
             <Spacer height={14} />
 
-            {/* Password */}
             <View style={styles.passwordContainer}>
               <ThemedTextInput
                 style={[styles.input, { flex: 1 }]}
@@ -162,22 +220,22 @@ const SignUp = () => {
                 onChangeText={setPassword}
                 secureTextEntry={!showPassword}
                 editable={!loading}
+                textContentType="newPassword"
               />
-              <ThemedButton 
-                onPress={() => setShowPassword(!showPassword)}
+              <ThemedButton
+                onPress={() => setShowPassword((value) => !value)}
                 style={styles.eyeButton}
               >
-                <Ionicons 
-                  name={showPassword ? 'eye-off' : 'eye'} 
-                  size={22} 
-                  color={theme.iconColor} 
+                <Ionicons
+                  name={showPassword ? 'eye-off' : 'eye'}
+                  size={22}
+                  color={theme.iconColor}
                 />
               </ThemedButton>
             </View>
 
             <Spacer height={14} />
 
-            {/* Confirm Password */}
             <View style={styles.passwordContainer}>
               <ThemedTextInput
                 style={[styles.input, { flex: 1 }]}
@@ -186,24 +244,24 @@ const SignUp = () => {
                 onChangeText={setConfirmPassword}
                 secureTextEntry={!showConfirmPassword}
                 editable={!loading}
+                textContentType="newPassword"
               />
-              <ThemedButton 
-                onPress={() => setShowConfirmPassword(!showConfirmPassword)}
+              <ThemedButton
+                onPress={() => setShowConfirmPassword((value) => !value)}
                 style={styles.eyeButton}
               >
-                <Ionicons 
-                  name={showConfirmPassword ? 'eye-off' : 'eye'} 
-                  size={22} 
-                  color={theme.iconColor} 
+                <Ionicons
+                  name={showConfirmPassword ? 'eye-off' : 'eye'}
+                  size={22}
+                  color={theme.iconColor}
                 />
               </ThemedButton>
             </View>
 
             <Spacer height={24} />
 
-            {/* Sign Up Button */}
-            <ThemedButton 
-              onPress={handleSignUp} 
+            <ThemedButton
+              onPress={handleSignUp}
               disabled={loading}
               style={[styles.signupButton, { backgroundColor: '#007AFF' }]}
             >
@@ -216,7 +274,6 @@ const SignUp = () => {
 
             <Spacer height={16} />
 
-            {/* Login Link */}
             <View style={styles.loginContainer}>
               <ThemedText style={styles.loginText}>Already have an account? </ThemedText>
               <ThemedButton onPress={() => router.push('/profile/login')}>

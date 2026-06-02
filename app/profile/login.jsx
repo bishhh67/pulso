@@ -1,10 +1,20 @@
-import React, { useState } from 'react';
-import { StyleSheet, TouchableWithoutFeedback, Keyboard, Alert, ActivityIndicator, ImageBackground, View } from 'react-native';
+import React, { useRef, useState } from 'react';
+import {
+  StyleSheet,
+  TouchableWithoutFeedback,
+  Keyboard,
+  Alert,
+  ActivityIndicator,
+  ImageBackground,
+  View,
+} from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 
-import { auth, signInWithEmailAndPassword, signOut } from '../../services/supabase/auth';
+import {
+  signInWithEmailAndPassword,
+} from '../../services/supabase/auth';
 import { getProfileById, upsertProfile } from '../../services/supabase/data';
 import ThemedText from '../../components/ThemedText';
 import Spacer from '../../components/Spacer';
@@ -22,46 +32,43 @@ const Login = () => {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const loginRequestLockRef = useRef(false);
+  const lastLoginAttemptAtRef = useRef(0);
 
   const handleLogin = async () => {
+    if (loginRequestLockRef.current) return;
+
+    loginRequestLockRef.current = true;
+    setLoading(true);
+
+    const now = Date.now();
+    if (now - lastLoginAttemptAtRef.current < 3000) {
+      console.log('[login] ignored due to debounce');
+      loginRequestLockRef.current = false;
+      setLoading(false);
+      return;
+    }
+    lastLoginAttemptAtRef.current = now;
+
     if (!email || !password) {
       Alert.alert('Missing Fields', 'Please enter both email and password.');
+      loginRequestLockRef.current = false;
+      setLoading(false);
       return;
     }
 
     if (password.length < 6) {
       Alert.alert('Invalid Password', 'Password must be at least 6 characters.');
+      loginRequestLockRef.current = false;
+      setLoading(false);
       return;
     }
 
     try {
-      setLoading(true);
+      console.log('LOGIN CALLED', { email });
 
-      const userCredential = await signInWithEmailAndPassword(auth, email, password);
+      const userCredential = await signInWithEmailAndPassword(null, email, password);
       const user = userCredential.user;
-
-      if (!user.emailVerified) {
-        Alert.alert(
-          'Email Not Verified',
-          'Please verify your email before logging in.',
-          [
-            {
-              text: 'Resend Email',
-              onPress: async () => {
-                try {
-                  router.push(`/profile/verify?email=${encodeURIComponent(email)}`);
-                } catch (error) {
-                  Alert.alert('Error', 'Failed to open verification screen.');
-                }
-              },
-            },
-            { text: 'OK' },
-          ]
-        );
-        await signOut(auth);
-        setLoading(false);
-        return;
-      }
 
       const userDoc = await getProfileById(user.uid);
       if (!userDoc) {
@@ -81,59 +88,47 @@ const Login = () => {
       }
 
       router.replace('/(tabs)/home');
-
     } catch (error) {
       console.error('Login error:', error);
 
-      if (String(error?.message || '').toLowerCase().includes('confirm')) {
-        Alert.alert(
-          'Email Not Verified',
-          'Please verify your email before logging in.',
-          [
-            {
-              text: 'Open Verification',
-              onPress: () => router.push(`/profile/verify?email=${encodeURIComponent(email)}`),
-            },
-            { text: 'OK' },
-          ]
-        );
-        return;
-      }
-      
       let errorMessage = 'Login failed. Please try again.';
-      if (error.code === 'auth/user-not-found') {
+      const errorCode = String(error?.code || '').toLowerCase();
+      const message = String(error?.message || '').toLowerCase();
+
+      if (errorCode.includes('invalid') && errorCode.includes('login')) {
+        errorMessage = 'Invalid email or password.';
+      } else if (errorCode.includes('user-not-found')) {
         errorMessage = 'No account found with this email.';
-      } else if (error.code === 'auth/wrong-password') {
+      } else if (errorCode.includes('wrong-password')) {
         errorMessage = 'Incorrect password.';
-      } else if (error.code === 'auth/invalid-email') {
-        errorMessage = 'Invalid email format.';
-      } else if (error.code === 'auth/too-many-requests') {
+      } else if (message.includes('invalid login credentials')) {
+        errorMessage = 'Incorrect email or password.';
+      } else if (message.includes('rate limit') || message.includes('too many')) {
         errorMessage = 'Too many failed attempts. Try again later.';
       }
 
       Alert.alert('Login Failed', errorMessage);
     } finally {
       setLoading(false);
+      loginRequestLockRef.current = false;
     }
   };
 
   return (
     <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-      <ImageBackground 
+      <ImageBackground
         source={require('../../assets/tree.png')}
         style={styles.background}
         resizeMode="cover"
       >
-        {/* Gradient Overlay */}
         <LinearGradient
           colors={
-            colorScheme === 'dark' 
+            colorScheme === 'dark'
               ? ['rgba(0,0,0,0.7)', 'rgba(0,0,0,0.85)']
               : ['rgba(255,255,255,0.7)', 'rgba(255,255,255,0.85)']
           }
           style={styles.gradient}
         >
-          {/* Back Button */}
           <View style={styles.headerContainer}>
             <ThemedButton onPress={() => router.back()} style={styles.backButton}>
               <Ionicons name="arrow-back" size={28} color={theme.iconColor} />
@@ -142,7 +137,6 @@ const Login = () => {
 
           <Spacer height={60} />
 
-          {/* Title */}
           <View style={styles.titleContainer}>
             <ThemedText title style={styles.title}>Pulchowk Campus</ThemedText>
             <ThemedText style={styles.subtitle}>Sign in to continue</ThemedText>
@@ -150,16 +144,21 @@ const Login = () => {
 
           <Spacer height={40} />
 
-          {/* Login Card */}
-          <View style={[
-            styles.card,
-            { backgroundColor: colorScheme === 'dark' ? 'rgba(20,20,20,0.9)' : 'rgba(255,255,255,0.95)' }
-          ]}>
+          <View
+            style={[
+              styles.card,
+              {
+                backgroundColor:
+                  colorScheme === 'dark'
+                    ? 'rgba(20,20,20,0.9)'
+                    : 'rgba(255,255,255,0.95)',
+              },
+            ]}
+          >
             <ThemedText style={styles.cardTitle}>Welcome Back</ThemedText>
 
             <Spacer height={24} />
 
-            {/* Email */}
             <ThemedTextInput
               style={styles.input}
               placeholder="Email Address"
@@ -169,11 +168,11 @@ const Login = () => {
               autoCapitalize="none"
               autoCorrect={false}
               editable={!loading}
+              textContentType="emailAddress"
             />
 
             <Spacer height={16} />
 
-            {/* Password */}
             <View style={styles.passwordContainer}>
               <ThemedTextInput
                 style={[styles.input, { flex: 1 }]}
@@ -182,24 +181,24 @@ const Login = () => {
                 onChangeText={setPassword}
                 secureTextEntry={!showPassword}
                 editable={!loading}
+                textContentType="password"
               />
-              <ThemedButton 
-                onPress={() => setShowPassword(!showPassword)}
+              <ThemedButton
+                onPress={() => setShowPassword((value) => !value)}
                 style={styles.eyeButton}
               >
-                <Ionicons 
-                  name={showPassword ? 'eye-off' : 'eye'} 
-                  size={22} 
-                  color={theme.iconColor} 
+                <Ionicons
+                  name={showPassword ? 'eye-off' : 'eye'}
+                  size={22}
+                  color={theme.iconColor}
                 />
               </ThemedButton>
             </View>
 
             <Spacer height={24} />
 
-            {/* Login Button */}
-            <ThemedButton 
-              onPress={handleLogin} 
+            <ThemedButton
+              onPress={handleLogin}
               disabled={loading}
               style={[styles.loginButton, { backgroundColor: '#007AFF' }]}
             >
@@ -212,9 +211,8 @@ const Login = () => {
 
             <Spacer height={16} />
 
-            {/* Sign Up Link */}
             <View style={styles.signupContainer}>
-              <ThemedText style={styles.signupText}>Don't have an account? </ThemedText>
+              <ThemedText style={styles.signupText}>Don&apos;t have an account? </ThemedText>
               <ThemedButton onPress={() => router.push('/profile/signup')}>
                 <ThemedText style={styles.signupLink}>Sign Up</ThemedText>
               </ThemedButton>
