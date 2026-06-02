@@ -1,0 +1,43 @@
+{
+  "expo": {
+    "scheme": "ReactNative",
+    "name": "ReactNative",
+    "slug": "ReactNative",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier" : "com.galaxies.pulchowkapp"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "edgeToEdgeEnabled": true,
+      "package" : "com.galaxies.pulchowkapp"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-build-properties" ,
+        {
+          "ios": {
+          "useFrameworks":"static"
+          } 
+        }
+      ]
+    ]
+  }
+}
