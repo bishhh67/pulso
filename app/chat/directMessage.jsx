@@ -13,7 +13,7 @@ import {
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { auth } from '../../services/supabase/auth';
-import { listDirectMessages, sendDirectMessage } from '../../services/supabase/data';
+import { areUsersFriends, listDirectMessages, sendDirectMessage } from '../../services/supabase/data';
 import ThemedView from '../../components/ThemedView';
 import ThemedText from '../../components/ThemedText';
 import ThemedButton from '../../components/ThemedButton';
@@ -32,6 +32,7 @@ export default function DirectMessage() {
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState('');
   const [loading, setLoading] = useState(true);
+  const [accessDenied, setAccessDenied] = useState(false);
   const flatListRef = useRef();
 
   // Create consistent chat ID (sorted user IDs)
@@ -43,19 +44,32 @@ export default function DirectMessage() {
       return;
     }
 
-    const loadMessages = async () => {
-      const messagesList = await listDirectMessages(chatId);
-      setMessages(messagesList);
-      setLoading(false);
+    const verifyAccessAndLoadMessages = async () => {
+      try {
+        const allowed = await areUsersFriends(auth.currentUser.uid, otherUserId);
+        if (!allowed) {
+          setAccessDenied(true);
+          setLoading(false);
+          return;
+        }
+
+        const messagesList = await listDirectMessages(chatId);
+        setMessages(messagesList);
+        setLoading(false);
+      } catch (error) {
+        console.error('Error verifying chat access:', error);
+        setLoading(false);
+      }
     };
 
-    loadMessages();
-    const interval = setInterval(loadMessages, 3000);
+    verifyAccessAndLoadMessages();
+    const interval = setInterval(verifyAccessAndLoadMessages, 3000);
     return () => clearInterval(interval);
   }, [chatId]);
 
   const sendMessage = async () => {
     if (!text.trim() || !auth.currentUser) return;
+    if (accessDenied) return;
 
     const messageText = text.trim();
     setText('');
@@ -111,6 +125,18 @@ export default function DirectMessage() {
     return (
       <ThemedView style={styles.centerContainer}>
         <ActivityIndicator size="large" color={theme.iconColorFocused} />
+      </ThemedView>
+    );
+  }
+
+  if (accessDenied) {
+    return (
+      <ThemedView style={styles.centerContainer}>
+        <Ionicons name="lock-closed-outline" size={64} color={theme.iconColor} style={{ opacity: 0.3 }} />
+        <ThemedText style={styles.emptyText}>Only accepted friends can chat</ThemedText>
+        <ThemedButton onPress={() => router.back()} style={{ marginTop: 16 }}>
+          <ThemedText style={{ color: '#fff' }}>Go back</ThemedText>
+        </ThemedButton>
       </ThemedView>
     );
   }

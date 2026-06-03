@@ -1,12 +1,12 @@
 import React from 'react';
-import { Pressable, StyleSheet, Image, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import ThemedText from '../ThemedText';
 import { useColorScheme } from 'react-native';
 import { Colors } from '../../constants/colors';
 
-export default function NotificationItem({ notification, onPress }) {
+export default function NotificationItem({ notification, onPress, onAcceptFriendRequest, onRejectFriendRequest }) {
   const router = useRouter();
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme] ?? Colors.light;
@@ -16,6 +16,10 @@ export default function NotificationItem({ notification, onPress }) {
       case 'like': return 'heart';
       case 'comment': return 'chatbubble';
       case 'follow': return 'person-add';
+      case 'friend_request': return 'person-add';
+      case 'friend_request_accepted': return 'people';
+      case 'friend_request_rejected': return 'close-circle';
+      case 'friend_removed': return 'person-remove';
       case 'share': return 'share';
       case 'message': return 'mail';
       default: return 'notifications';
@@ -28,6 +32,10 @@ export default function NotificationItem({ notification, onPress }) {
       case 'like': return `${name} liked your post`;
       case 'comment': return `${name} commented on your post`;
       case 'follow': return `${name} started following you`;
+      case 'friend_request': return `${name} sent you a friend request`;
+      case 'friend_request_accepted': return `${name} accepted your friend request`;
+      case 'friend_request_rejected': return `${name} rejected your friend request`;
+      case 'friend_removed': return `${name} removed you from friends`;
       case 'share': return `${name} shared your post`;
       case 'message': return `${name} sent you a message`;
       default: return 'New notification';
@@ -42,32 +50,52 @@ export default function NotificationItem({ notification, onPress }) {
       router.push(`/post/${notification.postId}`);
     } else if (notification.type === 'follow') {
       router.push(`/profile/${notification.fromUserId}`);
+    } else if (notification.type?.startsWith('friend_request') || notification.type === 'friend_removed') {
+      router.push(`/profile/${notification.fromUserId}`);
     }
   };
 
   return (
-    <Pressable
+    <View
       style={[
         styles.container,
         { backgroundColor: notification.read ? 'transparent' : theme.uiBackground },
       ]}
-      onPress={handlePress}
     >
-      <View style={[styles.iconContainer, { backgroundColor: theme.background }]}>
-        <Ionicons name={getIcon()} size={24} color={theme.iconColorFocused} />
-      </View>
+      <Pressable style={styles.rowContent} onPress={handlePress}>
+        <View style={[styles.iconContainer, { backgroundColor: theme.background }]}>
+          <Ionicons name={getIcon()} size={24} color={theme.iconColorFocused} />
+        </View>
 
-      <View style={styles.content}>
-        <ThemedText style={styles.message}>{getMessage()}</ThemedText>
-        <ThemedText style={styles.time}>
-          {formatTime(notification.createdAt)}
-        </ThemedText>
-      </View>
+        <View style={styles.content}>
+          <ThemedText style={styles.message}>{getMessage()}</ThemedText>
+          <ThemedText style={styles.time}>
+            {formatTime(notification.createdAt)}
+          </ThemedText>
+        </View>
 
-      {!notification.read && (
-        <View style={styles.unreadDot} />
+        {!notification.read && (
+          <View style={styles.unreadDot} />
+        )}
+      </Pressable>
+
+      {notification.type === 'friend_request' && (
+        <View style={styles.actionRow}>
+          <Pressable
+            style={[styles.actionButton, styles.rejectButton]}
+            onPress={() => onRejectFriendRequest?.(notification)}
+          >
+            <ThemedText style={styles.actionButtonText}>Reject</ThemedText>
+          </Pressable>
+          <Pressable
+            style={[styles.actionButton, styles.acceptButton]}
+            onPress={() => onAcceptFriendRequest?.(notification)}
+          >
+            <ThemedText style={[styles.actionButtonText, { color: '#fff' }]}>Accept</ThemedText>
+          </Pressable>
+        </View>
       )}
-    </Pressable>
+    </View>
   );
 }
 
@@ -89,8 +117,12 @@ const formatTime = (timestamp) => {
 
 const styles = StyleSheet.create({
   container: {
+    padding: 12,
+    borderRadius: 16,
+    marginBottom: 10,
+  },
+  rowContent: {
     flexDirection: 'row',
-    padding: 16,
     alignItems: 'center',
   },
   iconContainer: {
@@ -117,5 +149,29 @@ const styles = StyleSheet.create({
     height: 10,
     borderRadius: 5,
     backgroundColor: '#007AFF',
+  },
+  actionRow: {
+    flexDirection: 'row',
+    gap: 10,
+    justifyContent: 'flex-end',
+    marginTop: 12,
+  },
+  actionButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  acceptButton: {
+    backgroundColor: '#007AFF',
+    borderColor: '#007AFF',
+  },
+  rejectButton: {
+    backgroundColor: 'transparent',
+    borderColor: 'rgba(127,127,127,0.25)',
+  },
+  actionButtonText: {
+    fontSize: 13,
+    fontWeight: '700',
   },
 });

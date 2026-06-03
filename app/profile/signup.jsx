@@ -12,10 +12,7 @@ import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 
-import {
-  createUserWithEmailAndPassword,
-  requestEmailOtp,
-} from '../../services/supabase/auth';
+import { signUpWithEmailAndPassword } from '../../services/supabase/auth';
 import ThemedText from '../../components/ThemedText';
 import Spacer from '../../components/Spacer';
 import ThemedButton from '../../components/ThemedButton';
@@ -30,29 +27,22 @@ const getSignupErrorMessage = (error) => {
   const message = String(error?.message || '').toLowerCase();
 
   if (code.includes('rate') || message.includes('rate limit') || message.includes('too many')) {
-    return 'Too many attempts. Please wait 1-2 minutes before trying again.';
+    return 'Too many email requests. Please wait before sending another link.';
   }
 
-  if (code.includes('email') && message.includes('already')) {
-    return 'This email is already registered.';
+  if (message.includes('already registered') || message.includes('already exists')) {
+    return 'This email is already registered. Please log in instead.';
+  }
+
+  if (message.includes('invalid email')) {
+    return 'Please enter a valid email address.';
   }
 
   if (message.includes('password')) {
-    return 'Password is too weak. Please choose a stronger password.';
+    return 'Password must be at least 6 characters.';
   }
 
   return 'Failed to create your account. Please try again.';
-};
-
-const getOtpErrorMessage = (error) => {
-  const code = String(error?.code || '').toLowerCase();
-  const message = String(error?.message || '').toLowerCase();
-
-  if (code.includes('rate') || message.includes('rate limit') || message.includes('too many')) {
-    return 'Account created, but the verification email could not be sent right now. Please wait a minute and try resend from the next screen.';
-  }
-
-  return 'Account created, but we could not send the verification email right now.';
 };
 
 const SignUp = () => {
@@ -69,85 +59,70 @@ const SignUp = () => {
   const signupRequestLockRef = useRef(false);
   const lastSignupAttemptAtRef = useRef(0);
 
+  const handleSignUp = async () => {
+    if (signupRequestLockRef.current) return;
 
+    signupRequestLockRef.current = true;
+    setLoading(true);
 
-
-  
-// ONLY CHANGED: lock safety added in early returns
-
-const handleSignUp = async () => {
-  if (signupRequestLockRef.current) return;
-
-  signupRequestLockRef.current = true;
-  setLoading(true);
-
-  const now = Date.now();
-  if (now - lastSignupAttemptAtRef.current < 3000) {
-    console.log('[signup] ignored due to debounce');
-    signupRequestLockRef.current = false;
-    setLoading(false);
-    return;
-  }
-
-  lastSignupAttemptAtRef.current = now;
-
-  try {
-    if (!email || !password || !confirmPassword) {
-      Alert.alert('Missing Fields', 'Please fill in all fields.');
-      signupRequestLockRef.current = false;   // FIX
+    const now = Date.now();
+    if (now - lastSignupAttemptAtRef.current < 3000) {
+      signupRequestLockRef.current = false;
+      setLoading(false);
       return;
     }
+    lastSignupAttemptAtRef.current = now;
 
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      Alert.alert('Invalid Email', 'Please enter a valid email address.');
-      signupRequestLockRef.current = false;   // FIX
-      return;
+    const normalizedEmail = String(email || '').trim();
+    const normalizedPassword = String(password || '');
+
+    try {
+      if (!normalizedEmail) {
+        Alert.alert('Missing Email', 'Please enter your email address.');
+        return;
+      }
+
+      if (!isValidEmail(normalizedEmail)) {
+        Alert.alert('Invalid Email', 'Please enter a valid email address.');
+        return;
+      }
+
+      if (!normalizedPassword || !confirmPassword) {
+        Alert.alert('Missing Password', 'Please enter and confirm your password.');
+        return;
+      }
+
+      if (normalizedPassword.length < 6) {
+        Alert.alert('Weak Password', 'Password must be at least 6 characters.');
+        return;
+      }
+
+      if (normalizedPassword !== confirmPassword) {
+        Alert.alert('Passwords Do Not Match', 'Please make sure both passwords match.');
+        return;
+      }
+
+      await signUpWithEmailAndPassword(null, normalizedEmail, normalizedPassword);
+
+      Alert.alert(
+        'Verify your email',
+        'We sent a verification link to your email. Open it to return to the app and finish creating your profile.',
+        [
+          {
+            text: 'OK',
+            onPress: () =>
+              router.replace(`/profile/verify?email=${encodeURIComponent(normalizedEmail)}`),
+          },
+        ]
+      );
+    } catch (error) {
+      console.error('Signup error:', error);
+      Alert.alert('Sign Up Failed', getSignupErrorMessage(error));
+    } finally {
+      setLoading(false);
+      signupRequestLockRef.current = false;
     }
-
-    if (password.length < 6) {
-      Alert.alert('Weak Password', 'Password must be at least 6 characters.');
-      signupRequestLockRef.current = false;   // FIX
-      return;
-    }
-
-    if (password !== confirmPassword) {
-      Alert.alert('Passwords Don\'t Match', 'Please make sure both passwords match.');
-      signupRequestLockRef.current = false;   // FIX
-      return;
-    }
-
-    console.log('SIGNUP CALLED', { email });
-
-    await createUserWithEmailAndPassword(null, email, password);
-
-    Alert.alert(
-      'Account Created! 🎉',
-      'Now enter the 6-digit code sent to your email.',
-      [
-        {
-          text: 'OK',
-          onPress: () =>
-            router.push(`/profile/verify?email=${encodeURIComponent(email)}`),
-        },
-      ]
-    );
-
-  } catch (error) {
-    console.error('Signup error:', error);
-    Alert.alert('Sign Up Failed', getSignupErrorMessage(error));
-  } finally {
-    setLoading(false);
-    signupRequestLockRef.current = false;
-  }
-};
-
-
-
-
-
-
-
+  };
 
   return (
     <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
@@ -177,7 +152,7 @@ const handleSignUp = async () => {
               Join Us
             </ThemedText>
             <ThemedText style={styles.subtitle}>
-              Create your password, then verify with a 6-digit code
+              Create your account, then verify your email
             </ThemedText>
           </View>
 

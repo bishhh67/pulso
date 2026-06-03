@@ -1,7 +1,18 @@
 import React, { useState, useEffect } from 'react';
-import { StyleSheet, Image, Pressable, View, Modal, FlatList, Alert } from 'react-native';
+import {
+  StyleSheet,
+  Image,
+  Pressable,
+  View,
+  Modal,
+  FlatList,
+  Alert,
+  ActivityIndicator,
+} from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useEventListener } from 'expo';
+import { VideoView, useVideoPlayer } from 'expo-video';
 import { auth } from '../services/supabase/auth';
 import {
   getProfileById,
@@ -14,12 +25,133 @@ import {
   togglePostLike,
   incrementPostShare,
 } from '../services/supabase/data';
-import { getFileUrl } from '../src/storage/storageProvider';
+import { getFileUrl, resolvePlayableStorageUrl } from '../src/storage/storageProvider';
 import ThemedView from './ThemedView';
 import ThemedText from './ThemedText';
 import ThemedButton from './ThemedButton';
 import { useColorScheme } from 'react-native';
 import { Colors } from '../constants/colors';
+
+const VideoPostPlayer = ({ videoPath, videoThumbnail }) => {
+  const [resolvedUrl, setResolvedUrl] = useState(null);
+  const [resolutionMode, setResolutionMode] = useState('idle');
+  const [resolveError, setResolveError] = useState(null);
+  const [playerStatus, setPlayerStatus] = useState('idle');
+  const [playerError, setPlayerError] = useState(null);
+
+  useEffect(() => {
+    let active = true;
+
+    const resolveUrl = async () => {
+      if (!videoPath) {
+        setResolvedUrl(null);
+        setResolutionMode('missing');
+        setResolveError(null);
+        return;
+      }
+
+      setResolvedUrl(null);
+      setResolutionMode('loading');
+      setResolveError(null);
+      setPlayerError(null);
+      setPlayerStatus('loading');
+
+      try {
+        const result = await resolvePlayableStorageUrl(videoPath);
+        if (!active) return;
+
+        console.log('[video] resolved storage url:', result);
+        setResolvedUrl(result.url || null);
+        setResolutionMode(result.mode || 'unknown');
+        if (!result.url) {
+          setResolveError(new Error('No playable video URL could be resolved.'));
+        }
+      } catch (error) {
+        if (!active) return;
+
+        console.error('[video] url resolution failed:', { videoPath, error });
+        setResolveError(error);
+        setResolutionMode('error');
+      }
+    };
+
+    void resolveUrl();
+
+    return () => {
+      active = false;
+    };
+  }, [videoPath]);
+
+  const player = useVideoPlayer(resolvedUrl ?? null, (instance) => {
+    instance.loop = false;
+    instance.muted = false;
+  });
+
+  useEventListener(player, 'statusChange', ({ status, error }) => {
+    setPlayerStatus(status);
+
+    if (status === 'error' || error) {
+      const message = error?.message || 'Unknown playback error';
+      setPlayerError(message);
+      console.error('[video] playback status error:', {
+        videoPath,
+        resolvedUrl,
+        resolutionMode,
+        status,
+        error,
+      });
+      return;
+    }
+
+    console.log('[video] playback status change:', {
+      videoPath,
+      resolvedUrl,
+      resolutionMode,
+      status,
+    });
+  });
+
+  if (!videoPath) return null;
+
+  return (
+    <View style={styles.videoContainer}>
+      {resolvedUrl ? (
+        <VideoView
+          player={player}
+          nativeControls
+          contentFit="cover"
+          style={styles.videoPlayer}
+          onFirstFrameRender={() => {
+            console.log('[video] first frame rendered:', {
+              videoPath,
+              resolvedUrl,
+              resolutionMode,
+            });
+          }}
+        />
+      ) : (
+        <View style={styles.videoPlaceholder}>
+          <ActivityIndicator size="small" color="#fff" />
+          <ThemedText style={styles.videoPlaceholderText}>
+            {resolveError ? 'Video unavailable' : 'Loading video...'}
+          </ThemedText>
+          {videoThumbnail ? (
+            <Image source={{ uri: getFileUrl(videoThumbnail) }} style={styles.videoFallbackImage} />
+          ) : null}
+        </View>
+      )}
+
+      {(resolveError || playerError || playerStatus === 'error') && (
+        <View style={styles.videoErrorOverlay}>
+          <Ionicons name="warning-outline" size={20} color="#fff" />
+          <ThemedText style={styles.videoErrorText}>
+            {playerError || resolveError?.message || 'Playback failed'}
+          </ThemedText>
+        </View>
+      )}
+    </View>
+  );
+};
 
 export default function PostCard({ post, onCommentPress, onPostPress }) {
   const router = useRouter();
@@ -214,14 +346,9 @@ export default function PostCard({ post, onCommentPress, onPostPress }) {
       {(post.imagePath || post.image) && (
         <Image source={{ uri: getFileUrl(post.imagePath || post.image) }} style={styles.postImage} />
       )}
-      
+
       {post.video && (
-        <View style={styles.videoContainer}>
-          <Image source={{ uri: post.videoThumbnail || post.video }} style={styles.postImage} />
-          <View style={styles.playButton}>
-            <Ionicons name="play-circle" size={64} color="rgba(255,255,255,0.9)" />
-          </View>
-        </View>
+        <VideoPostPlayer videoPath={post.video} videoThumbnail={post.videoThumbnail} />
       )}
 
       {/* Action Buttons */}
@@ -376,12 +503,51 @@ const styles = StyleSheet.create({
     height: 300,
     borderRadius: 12,
     marginBottom: 12,
+    overflow: 'hidden',
+    backgroundColor: '#000',
   },
-  playButton: {
+  videoPlayer: {
+    width: '100%',
+    height: '100%',
+    backgroundColor: '#000',
+  },
+  videoPlaceholder: {
+    width: '100%',
+    height: '100%',
+    backgroundColor: '#111827',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    paddingHorizontal: 16,
+  },
+  videoPlaceholderText: {
+    color: '#fff',
+    fontSize: 13,
+    opacity: 0.9,
+    textAlign: 'center',
+    zIndex: 2,
+  },
+  videoFallbackImage: {
+    ...StyleSheet.absoluteFillObject,
+    opacity: 0.28,
+  },
+  videoErrorOverlay: {
     position: 'absolute',
-    top: '50%',
-    left: '50%',
-    transform: [{ translateX: -32 }, { translateY: -32 }],
+    left: 12,
+    right: 12,
+    bottom: 12,
+    backgroundColor: 'rgba(0,0,0,0.72)',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  videoErrorText: {
+    color: '#fff',
+    fontSize: 12,
+    flex: 1,
   },
   actions: {
     flexDirection: 'row',

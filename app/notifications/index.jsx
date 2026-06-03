@@ -9,7 +9,13 @@ import ThemedButton from '../../components/ThemedButton';
 import { useColorScheme } from 'react-native';
 import { Colors } from '../../constants/colors';
 import { auth } from '../../services/supabase/auth';
-import { listNotifications, markNotificationRead, markAllNotificationsRead } from '../../services/supabase/data';
+import {
+  acceptFriendRequest,
+  rejectFriendRequest,
+  listNotifications,
+  markNotificationRead,
+  markAllNotificationsRead,
+} from '../../services/supabase/data';
 
 export default function Notifications() {
   const router = useRouter();
@@ -58,6 +64,25 @@ export default function Notifications() {
     }
   };
 
+  const handleFriendRequestAction = async (notification, action) => {
+    try {
+      if (!notification.friendRequestId) return;
+
+      if (action === 'accept') {
+        await acceptFriendRequest(notification.friendRequestId);
+      } else if (action === 'reject') {
+        await rejectFriendRequest(notification.friendRequestId);
+      }
+
+      await markNotificationRead(notification.id);
+      setNotifications((prev) =>
+        prev.map((item) => (item.id === notification.id ? { ...item, read: true } : item))
+      );
+    } catch (error) {
+      console.error(`Error ${action}ing friend request:`, error);
+    }
+  };
+
   if (!auth.currentUser) {
     return (
       <ThemedView style={styles.centerContainer}>
@@ -102,7 +127,8 @@ export default function Notifications() {
             <NotificationItem
               notification={item}
               onPress={() => markAsRead(item.id)}
-              isUnread={!item.read}
+              onAcceptFriendRequest={(notification) => handleFriendRequestAction(notification, 'accept')}
+              onRejectFriendRequest={(notification) => handleFriendRequestAction(notification, 'reject')}
             />
           )}
           ListEmptyComponent={() => (

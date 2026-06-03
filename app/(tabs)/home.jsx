@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { StyleSheet, FlatList, Image, Pressable, RefreshControl } from 'react-native';
+import { StyleSheet, FlatList, Image, Pressable, RefreshControl, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { auth } from '../../services/supabase/auth';
-import { getUserFollowing, listAllPosts, listFeedPosts } from '../../services/supabase/data';
+import { listAllPosts, listFeedPosts } from '../../services/supabase/data';
 import ThemedView from '../../components/ThemedView';
 import ThemedText from '../../components/ThemedText';
 import Spacer from '../../components/Spacer';
@@ -29,23 +29,20 @@ export default function Home() {
   const [refreshing, setRefreshing] = useState(false);
   const [selectedPost, setSelectedPost] = useState(null);
   const [commentModalVisible, setCommentModalVisible] = useState(false);
+  const [feedFilter, setFeedFilter] = useState('friends');
 
   useEffect(() => {
     loadFeedPosts();
-  }, []);
+  }, [feedFilter]);
 
   const loadFeedPosts = async () => {
     try {
-      if (!auth.currentUser) {
+      if (feedFilter === 'all' || !auth.currentUser) {
         setPosts(await listAllPosts(50));
         return;
       }
 
-      const following = await getUserFollowing(auth.currentUser.uid);
-      const authorsToShow = [...following, auth.currentUser.uid];
-      const loadedPosts = authorsToShow.length > 0
-        ? await listFeedPosts(auth.currentUser.uid, 50)
-        : await listAllPosts(50);
+      const loadedPosts = await listFeedPosts(auth.currentUser.uid, 50);
       setPosts(loadedPosts);
     } catch (error) {
       console.error('Error loading feed:', error);
@@ -69,6 +66,42 @@ export default function Home() {
         data={posts}
         ListHeaderComponent={() => (
           <>
+            <View style={styles.filterRow}>
+              <Pressable
+                style={[
+                  styles.filterPill,
+                  feedFilter === 'friends' && styles.filterPillActive,
+                ]}
+                onPress={() => setFeedFilter('friends')}
+              >
+                <ThemedText
+                  style={[
+                    styles.filterText,
+                    feedFilter === 'friends' && styles.filterTextActive,
+                  ]}
+                >
+                  Friends Posts
+                </ThemedText>
+              </Pressable>
+
+              <Pressable
+                style={[
+                  styles.filterPill,
+                  feedFilter === 'all' && styles.filterPillActive,
+                ]}
+                onPress={() => setFeedFilter('all')}
+              >
+                <ThemedText
+                  style={[
+                    styles.filterText,
+                    feedFilter === 'all' && styles.filterTextActive,
+                  ]}
+                >
+                  All Posts
+                </ThemedText>
+              </Pressable>
+            </View>
+
             {/* Hero box */}
             <Pressable style={styles.heroBox} onPress={() => router.push('/')} />
             <Spacer height={20} />
@@ -105,7 +138,11 @@ export default function Home() {
         ListEmptyComponent={() => (
           <ThemedView style={styles.emptyState}>
             <ThemedText style={styles.emptyText}>No posts yet</ThemedText>
-            <ThemedText style={styles.emptySubtext}>Follow users or clubs to see their posts</ThemedText>
+            <ThemedText style={styles.emptySubtext}>
+              {feedFilter === 'friends'
+                ? 'Add friends to see their posts here'
+                : 'Everyone’s posts will appear here when they publish'}
+            </ThemedText>
           </ThemedView>
         )}
       />
@@ -131,6 +168,34 @@ const RING = 78;
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
+  filterRow: {
+    flexDirection: 'row',
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingTop: 16,
+  },
+  filterPill: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 999,
+    alignItems: 'center',
+    backgroundColor: 'rgba(127,127,127,0.12)',
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  filterPillActive: {
+    backgroundColor: '#007AFF',
+    borderColor: '#007AFF',
+  },
+  filterText: {
+    fontSize: 14,
+    fontWeight: '700',
+    opacity: 0.7,
+  },
+  filterTextActive: {
+    color: '#fff',
+    opacity: 1,
+  },
   heroBox: { height: 280, margin: 16, borderRadius: 22, backgroundColor: '#6a00ff' },
   clubsRow: { paddingHorizontal: 16 },
   clubItem: { width: 82, alignItems: 'center', marginRight: 14 },

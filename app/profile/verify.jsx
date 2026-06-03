@@ -1,230 +1,43 @@
-import React, { useEffect, useRef, useState } from 'react';
-import {
-  View,
-  StyleSheet,
-  Alert,
-  ActivityIndicator,
-  ImageBackground,
-  TextInput,
-} from 'react-native';
+import React, { useRef, useState } from 'react';
+import { View, StyleSheet, ImageBackground, Alert, ActivityIndicator } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-
-import {
-  auth,
-  ensureProfileForUser,
-  requestEmailOtp,
-  verifyEmailOtp,
-} from '../../services/supabase/auth';
 
 import ThemedText from '../../components/ThemedText';
 import Spacer from '../../components/Spacer';
 import ThemedButton from '../../components/ThemedButton';
 import { useColorScheme } from 'react-native';
 import { Colors } from '../../constants/colors';
-
-const CODE_LENGTH = 6;
-
-const getWaitSeconds = (error) => {
-  const message = String(error?.message || '');
-  const match = message.match(/(\d+)\s*seconds?/i);
-  return match ? Number(match[1]) : 60;
-};
-
-const getVerifyErrorMessage = (error) => {
-  const code = String(error?.code || '').toLowerCase();
-  const message = String(error?.message || '').toLowerCase();
-
-  if (code.includes('rate') || message.includes('rate limit') || message.includes('too many')) {
-    return {
-      title: 'Slow down a bit',
-      message: 'Too many attempts. Please wait a minute and try again.',
-    };
-  }
-
-  if (
-    code.includes('expired') ||
-    message.includes('expired') ||
-    message.includes('otp expired')
-  ) {
-    return {
-      title: 'Code expired',
-      message: 'That code expired. Tap resend to get a fresh one.',
-    };
-  }
-
-  if (
-    code.includes('invalid') ||
-    message.includes('invalid') ||
-    message.includes('otp') ||
-    message.includes('token')
-  ) {
-    return {
-      title: 'Invalid code',
-      message: 'That code is not valid. Check the latest email and try again.',
-    };
-  }
-
-  return {
-    title: 'Verification failed',
-    message: 'We could not verify that code right now. Please try again.',
-  };
-};
-
-const getSendErrorMessage = (error) => {
-  const code = String(error?.code || '').toLowerCase();
-  const message = String(error?.message || '').toLowerCase();
-
-  if (code.includes('rate') || message.includes('rate limit') || message.includes('too many')) {
-    return {
-      title: 'Code sent too often',
-      message: 'Please wait a minute before requesting another code.',
-    };
-  }
-
-  if (message.includes('invalid email')) {
-    return {
-      title: 'Invalid email',
-      message: 'Please go back and enter a valid email address.',
-    };
-  }
-
-  return {
-    title: 'Could not resend code',
-    message: 'Please try again in a moment.',
-  };
-};
+import { resendSignupConfirmation } from '../../services/supabase/auth';
 
 const Verify = () => {
   const router = useRouter();
   const { email } = useLocalSearchParams();
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme] ?? Colors.light;
-  const codeInputRef = useRef(null);
+  const resolvedEmail = String(Array.isArray(email) ? email[0] : email || '').trim();
+  const [resending, setResending] = useState(false);
+  const resendLockRef = useRef(false);
 
-  const resolvedEmail = String(Array.isArray(email) ? email[0] : email || auth.currentUser?.email || '').trim();
+  const handleResend = async () => {
+    if (!resolvedEmail || resendLockRef.current || resending) return;
 
-  const [code, setCode] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [resendLoading, setResendLoading] = useState(false);
-  const [cooldownSeconds, setCooldownSeconds] = useState(0);
-  const verifyRequestLockRef = useRef(false);
-  const lastVerifyAttemptAtRef = useRef(0);
-  const resendRequestLockRef = useRef(false);
-  const lastResendAttemptAtRef = useRef(0);
-
-  useEffect(() => {
-    codeInputRef.current?.focus?.();
-  }, []);
-
-  useEffect(() => {
-    if (cooldownSeconds <= 0) return undefined;
-
-    const interval = setInterval(() => {
-      setCooldownSeconds((value) => Math.max(0, value - 1));
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [cooldownSeconds]);
-
-
-
-// ONLY CHANGED: added safe lock reset in early exits
-
-const handleVerify = async () => {
-  if (verifyRequestLockRef.current) return;
-
-  verifyRequestLockRef.current = true;
-
-  const normalizedCode = String(code || '').replace(/\D/g, '');
-  const now = Date.now();
-
-  if (now - lastVerifyAttemptAtRef.current < 3000) {
-    console.log('[otp-verify] ignored due to debounce');
-    verifyRequestLockRef.current = false; // FIX
-    return;
-  }
-  lastVerifyAttemptAtRef.current = now;
-
-  if (!resolvedEmail) {
-    Alert.alert('Missing email', 'We need the email address that received the code.');
-    router.replace('/profile/login');
-    verifyRequestLockRef.current = false; // FIX
-    return;
-  }
-
-  if (normalizedCode.length !== CODE_LENGTH) {
-    Alert.alert('Incomplete code', 'Enter the 6-digit code from your email.');
-    verifyRequestLockRef.current = false; // FIX
-    return;
-  }
-
-  try {
-    setLoading(true);
-
-    console.log('OTP VERIFY CALLED', { email: resolvedEmail });
-
-    const { user } = await verifyEmailOtp(resolvedEmail, normalizedCode);
-
-    if (!user) {
-      throw new Error('Verification failed: no user returned');
-    }
+    resendLockRef.current = true;
+    setResending(true);
 
     try {
-      await ensureProfileForUser(user);
-    } catch (profileError) {
-      console.error('Profile setup after OTP verification failed:', profileError);
-    }
-
-    router.replace('/(tabs)/home');
-
-  } catch (error) {
-    console.error('Verify OTP error:', error);
-    const friendlyError = getVerifyErrorMessage(error);
-    Alert.alert(friendlyError.title, friendlyError.message);
-  } finally {
-    setLoading(false);
-    verifyRequestLockRef.current = false;
-  }
-};
-
-
-
-
-
-
-  const handleResendCode = async () => {
-    if (!resolvedEmail || resendRequestLockRef.current || resendLoading || cooldownSeconds > 0) return;
-
-    resendRequestLockRef.current = true;
-
-    const now = Date.now();
-    if (now - lastResendAttemptAtRef.current < 3000) {
-      console.log('[otp-resend] ignored due to debounce');
-      resendRequestLockRef.current = false;
-      return;
-    }
-    lastResendAttemptAtRef.current = now;
-
-    try {
-      setResendLoading(true);
-      console.log('OTP SEND CALLED', { email: resolvedEmail, source: 'resend' });
-      await requestEmailOtp(resolvedEmail);
-      setCooldownSeconds(60);
-      setCode('');
-      Alert.alert('Code sent', 'We sent a fresh 6-digit code to your email.');
-      codeInputRef.current?.focus?.();
+      await resendSignupConfirmation(null, resolvedEmail);
+      Alert.alert('Email sent', 'We sent another verification email. Please check your inbox.');
     } catch (error) {
-      console.error('Resend OTP error:', error);
-      const friendlyError = getSendErrorMessage(error);
-      if (friendlyError.title === 'Code sent too often') {
-        setCooldownSeconds(getWaitSeconds(error));
-      }
-      Alert.alert(friendlyError.title, friendlyError.message);
+      console.error('Resend verification email failed:', error);
+      Alert.alert(
+        'Could not resend',
+        'We could not send the verification email right now. Please try again in a moment.'
+      );
     } finally {
-      setResendLoading(false);
-      resendRequestLockRef.current = false;
+      setResending(false);
+      resendLockRef.current = false;
     }
   };
 
@@ -260,91 +73,44 @@ const handleVerify = async () => {
           <Spacer height={24} />
 
           <ThemedText title style={styles.title}>
-            Enter the code
+            Check your email
           </ThemedText>
 
           <Spacer height={16} />
 
           <ThemedText style={styles.message}>
-            We sent a 6-digit code to:
+            Open the signup link sent to:
           </ThemedText>
-
           <ThemedText style={styles.email}>{resolvedEmail || 'your email'}</ThemedText>
 
           <Spacer height={12} />
 
           <ThemedText style={styles.instruction}>
-            Type the latest code from your inbox to finish signing in.
+            The link will open this app and sign you in automatically.
           </ThemedText>
 
-          <Spacer height={28} />
-
-          <TextInput
-            ref={codeInputRef}
-            style={[
-              styles.codeInput,
-              { borderColor: theme.iconColor, color: theme.text },
-            ]}
-            value={code}
-            onChangeText={(value) => setCode(value.replace(/\D/g, '').slice(0, CODE_LENGTH))}
-            keyboardType="number-pad"
-            returnKeyType="done"
-            textContentType="oneTimeCode"
-            autoComplete="one-time-code"
-            maxLength={CODE_LENGTH}
-            placeholder="123456"
-            placeholderTextColor={theme.iconColor}
-            editable={!loading && !resendLoading}
-            textAlign="center"
-          />
-
-          <Spacer height={20} />
+          <Spacer height={32} />
 
           <ThemedButton
-            onPress={handleVerify}
-            disabled={loading || code.replace(/\D/g, '').length !== CODE_LENGTH}
-            style={[styles.verifyButton, { backgroundColor: '#007AFF' }]}
+            onPress={handleResend}
+            disabled={!resolvedEmail || resending}
+            style={[styles.button, { backgroundColor: '#007AFF' }]}
           >
-            {loading ? (
+            {resending ? (
               <ActivityIndicator size="small" color="#fff" />
             ) : (
-              <ThemedText style={styles.verifyButtonText}>Verify and continue</ThemedText>
+              <ThemedText style={styles.buttonText}>Resend verification email</ThemedText>
             )}
           </ThemedButton>
 
-          <Spacer height={16} />
+          <Spacer height={14} />
 
           <ThemedButton
-            onPress={handleResendCode}
-            disabled={resendLoading || cooldownSeconds > 0}
-            style={[styles.resendButton, { backgroundColor: theme.uiBackground }]}
+            onPress={() => router.replace('/profile/signup')}
+            style={[styles.secondaryButton, { backgroundColor: theme.uiBackground }]}
           >
-            {resendLoading ? (
-              <ActivityIndicator size="small" color="#007AFF" />
-            ) : (
-              <ThemedText style={styles.resendButtonText}>
-                {cooldownSeconds > 0 ? `Resend in ${cooldownSeconds}s` : 'Send a new code'}
-              </ThemedText>
-            )}
+            <ThemedText style={styles.secondaryButtonText}>Back to Signup</ThemedText>
           </ThemedButton>
-
-          <Spacer height={16} />
-
-          <ThemedButton
-            onPress={() => router.replace('/profile/login')}
-            style={[styles.backButton, { backgroundColor: theme.uiBackground }]}
-          >
-            <ThemedText style={styles.backButtonText}>Use a different email</ThemedText>
-          </ThemedButton>
-
-          <Spacer height={20} />
-
-          <View style={[styles.infoBox, { backgroundColor: theme.uiBackground }]}>
-            <Ionicons name="information-circle-outline" size={18} color={theme.iconColor} />
-            <ThemedText style={styles.infoText}>
-              If the email does not arrive, check spam or request a fresh code.
-            </ThemedText>
-          </View>
         </View>
       </LinearGradient>
     </ImageBackground>
@@ -407,60 +173,25 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 20,
   },
-  codeInput: {
-    width: '100%',
-    borderWidth: 1,
-    borderRadius: 16,
-    paddingVertical: 18,
-    paddingHorizontal: 18,
-    fontSize: 30,
-    fontWeight: '700',
-    letterSpacing: 10,
-    backgroundColor: 'transparent',
-  },
-  verifyButton: {
+  button: {
     width: '100%',
     paddingVertical: 14,
     borderRadius: 12,
     alignItems: 'center',
   },
-  verifyButtonText: {
+  secondaryButton: {
+    width: '100%',
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  buttonText: {
     color: '#fff',
     fontSize: 16,
     fontWeight: '600',
   },
-  resendButton: {
-    width: '100%',
-    paddingVertical: 14,
-    borderRadius: 12,
-    alignItems: 'center',
-  },
-  resendButtonText: {
-    color: '#007AFF',
+  secondaryButtonText: {
     fontSize: 16,
     fontWeight: '600',
-  },
-  backButton: {
-    width: '100%',
-    paddingVertical: 14,
-    borderRadius: 12,
-    alignItems: 'center',
-  },
-  backButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  infoBox: {
-    flexDirection: 'row',
-    padding: 12,
-    borderRadius: 10,
-    gap: 8,
-    alignItems: 'flex-start',
-  },
-  infoText: {
-    fontSize: 12,
-    opacity: 0.7,
-    flex: 1,
-    lineHeight: 16,
   },
 });

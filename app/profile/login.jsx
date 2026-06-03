@@ -15,7 +15,6 @@ import { LinearGradient } from 'expo-linear-gradient';
 import {
   signInWithEmailAndPassword,
 } from '../../services/supabase/auth';
-import { getProfileById, upsertProfile } from '../../services/supabase/data';
 import ThemedText from '../../components/ThemedText';
 import Spacer from '../../components/Spacer';
 import ThemedButton from '../../components/ThemedButton';
@@ -43,7 +42,6 @@ const Login = () => {
 
     const now = Date.now();
     if (now - lastLoginAttemptAtRef.current < 3000) {
-      console.log('[login] ignored due to debounce');
       loginRequestLockRef.current = false;
       setLoading(false);
       return;
@@ -65,28 +63,7 @@ const Login = () => {
     }
 
     try {
-      console.log('LOGIN CALLED', { email });
-
-      const userCredential = await signInWithEmailAndPassword(null, email, password);
-      const user = userCredential.user;
-
-      const userDoc = await getProfileById(user.uid);
-      if (!userDoc) {
-        await upsertProfile({
-          id: user.uid,
-          email: user.email,
-          name: user.email.split('@')[0],
-          profilePhoto: null,
-          bio: '',
-          following: [],
-          followers: [],
-          searchHistory: [],
-        });
-        Alert.alert('Welcome!', 'Your account has been set up! 🎉');
-      } else {
-        Alert.alert('Welcome Back!', `Hello ${userDoc.name}! 🎉`);
-      }
-
+      await signInWithEmailAndPassword(null, email, password);
       router.replace('/(tabs)/home');
     } catch (error) {
       console.error('Login error:', error);
@@ -103,6 +80,8 @@ const Login = () => {
         errorMessage = 'Incorrect password.';
       } else if (message.includes('invalid login credentials')) {
         errorMessage = 'Incorrect email or password.';
+      } else if (message.includes('verify your email') || message.includes('email not confirmed')) {
+        errorMessage = 'Please verify your email before logging in.';
       } else if (message.includes('rate limit') || message.includes('too many')) {
         errorMessage = 'Too many failed attempts. Try again later.';
       }

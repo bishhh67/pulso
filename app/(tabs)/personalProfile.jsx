@@ -7,7 +7,7 @@ import ThemedView from '../../components/ThemedView';
 import ThemedText from '../../components/ThemedText';
 import Spacer from '../../components/Spacer';
 import ThemedButton from '../../components/ThemedButton';
-import FollowersModal from '../../components/FollowersModal';
+import FriendsModal from '../../components/FollowersModal';
 import PostDetailModal from '../../components/PostDetailModal';
 import CommentModal from '../../components/CommentModal';
 import CreatePostButton from '../../components/CreatePostButton';
@@ -16,7 +16,7 @@ import { useColorScheme } from 'react-native';
 import { Colors } from '../../constants/colors';
 import { useFocusEffect } from '@react-navigation/native';
 import { auth, signOut } from '../../services/supabase/auth';
-import { getProfileById, listAuthorPosts, updateProfile } from '../../services/supabase/data';
+import { getProfileById, listAuthorPosts, listFriendIds, updateProfile } from '../../services/supabase/data';
 import { uploadFile, getFileUrl } from '../../src/storage/storageProvider';
 
 const windowWidth = Dimensions.get('window').width;
@@ -33,8 +33,8 @@ export default function PersonalProfile() {
   const [refreshing, setRefreshing] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [editModalVisible, setEditModalVisible] = useState(false);
-  const [followersModalVisible, setFollowersModalVisible] = useState(false);
-  const [followingModalVisible, setFollowingModalVisible] = useState(false);
+  const [friendsModalVisible, setFriendsModalVisible] = useState(false);
+  const [friendIds, setFriendIds] = useState([]);
   const [postDetailModalVisible, setPostDetailModalVisible] = useState(false);
   const [commentModalVisible, setCommentModalVisible] = useState(false);
   const [selectedPostId, setSelectedPostId] = useState(null);
@@ -68,6 +68,7 @@ export default function PersonalProfile() {
         setUserData(data);
         setEditName(data.name || '');
         setEditBio(data.bio || '');
+        setFriendIds(await listFriendIds(auth.currentUser.uid));
       }
       setLoading(false);
     } catch (error) {
@@ -115,7 +116,7 @@ export default function PersonalProfile() {
 
       // Launch image picker
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        mediaTypes: ['images'],
         allowsEditing: true,
         aspect: [1, 1],
         quality: 0.7,
@@ -232,8 +233,7 @@ export default function PersonalProfile() {
     );
   }
 
-  const followers = userData.followers?.length || 0;
-  const following = userData.following?.length || 0;
+  const friends = friendIds.length;
 
   return (
     <ThemedView style={styles.container}>
@@ -268,13 +268,9 @@ export default function PersonalProfile() {
             <ThemedText title style={styles.statNumber}>{userPosts.length}</ThemedText>
             <ThemedText style={styles.statLabel}>Posts</ThemedText>
           </View>
-          <Pressable style={styles.stat} onPress={() => setFollowersModalVisible(true)}>
-            <ThemedText title style={styles.statNumber}>{followers}</ThemedText>
-            <ThemedText style={styles.statLabel}>Followers</ThemedText>
-          </Pressable>
-          <Pressable style={styles.stat} onPress={() => setFollowingModalVisible(true)}>
-            <ThemedText title style={styles.statNumber}>{following}</ThemedText>
-            <ThemedText style={styles.statLabel}>Following</ThemedText>
+          <Pressable style={styles.stat} onPress={() => setFriendsModalVisible(true)}>
+            <ThemedText title style={styles.statNumber}>{friends}</ThemedText>
+            <ThemedText style={styles.statLabel}>Friends</ThemedText>
           </Pressable>
         </View>
       </View>
@@ -399,21 +395,11 @@ export default function PersonalProfile() {
         </View>
       </Modal>
 
-      {/* Followers Modal */}
-      <FollowersModal
-        visible={followersModalVisible}
-        onClose={() => setFollowersModalVisible(false)}
-        followIds={userData.followers || []}
-        type="followers"
-        currentUserId={auth.currentUser?.uid}
-      />
-
-      {/* Following Modal */}
-      <FollowersModal
-        visible={followingModalVisible}
-        onClose={() => setFollowingModalVisible(false)}
-        followIds={userData.following || []}
-        type="following"
+      {/* Friends Modal */}
+      <FriendsModal
+        visible={friendsModalVisible}
+        onClose={() => setFriendsModalVisible(false)}
+        friendIds={friendIds}
         currentUserId={auth.currentUser?.uid}
       />
 

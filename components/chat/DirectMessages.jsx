@@ -3,7 +3,7 @@ import { View, StyleSheet, FlatList, Image, Pressable, ActivityIndicator } from 
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { auth } from '../../services/supabase/auth';
-import { listProfilesExcept } from '../../services/supabase/data';
+import { listFriendProfiles } from '../../services/supabase/data';
 import { getFileUrl } from '../../src/storage/storageProvider';
 import ThemedView from '../ThemedView';
 import ThemedText from '../ThemedText';
@@ -29,7 +29,7 @@ export default function DirectMessages() {
         return;
       }
 
-      const usersList = await listProfilesExcept(auth.currentUser.email);
+      const usersList = await listFriendProfiles(auth.currentUser.uid);
 
       setUsers(usersList.map((user) => ({ userId: user.uid, ...user })));
       setLoading(false);
@@ -102,7 +102,8 @@ export default function DirectMessages() {
         ListEmptyComponent={() => (
           <View style={styles.emptyContainer}>
             <Ionicons name="people-outline" size={64} color={theme.iconColor} style={{ opacity: 0.3 }} />
-            <ThemedText style={styles.emptyText}>No users found</ThemedText>
+            <ThemedText style={styles.emptyText}>No friends found</ThemedText>
+            <ThemedText style={styles.emptySubText}>Only accepted friends appear here</ThemedText>
           </View>
         )}
       />
@@ -164,6 +165,12 @@ const styles = StyleSheet.create({
     marginTop: 16,
     fontSize: 16,
     opacity: 0.5,
+    textAlign: 'center',
+  },
+  emptySubText: {
+    marginTop: 6,
+    fontSize: 13,
+    opacity: 0.4,
     textAlign: 'center',
   },
 });

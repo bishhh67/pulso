@@ -72,7 +72,31 @@ export const normalizeNotification = (row) => {
     fromUserId: row.from_user_id,
     fromUserName: row.from_user_name,
     postId: row.post_id,
+    friendRequestId: row.friend_request_id,
     read: !!row.read,
+    createdAt: isoTimestamp(row.created_at),
+  };
+};
+
+export const normalizeFriendRequest = (row) => {
+  if (!row) return null;
+  return {
+    id: row.id,
+    requesterId: row.requester_id,
+    receiverId: row.receiver_id,
+    status: row.status,
+    createdAt: isoTimestamp(row.created_at),
+    updatedAt: isoTimestamp(row.updated_at),
+    respondedAt: isoTimestamp(row.responded_at),
+  };
+};
+
+export const normalizeFriendship = (row) => {
+  if (!row) return null;
+  return {
+    id: row.id,
+    userLowId: row.user_low_id,
+    userHighId: row.user_high_id,
     createdAt: isoTimestamp(row.created_at),
   };
 };
@@ -174,6 +198,18 @@ const mapNoteInsert = (note) => ({
   file_name: note.fileName || null,
   uploaded_by: note.uploadedBy || 'anonymous',
 });
+
+const mapFriendRequestInsert = (request) => ({
+  requester_id: request.requesterId,
+  receiver_id: request.receiverId,
+  status: request.status || 'pending',
+  responded_at: request.respondedAt ?? null,
+});
+
+const mapFriendshipInsert = (userId, friendId) => {
+  const [userLowId, userHighId] = [userId, friendId].sort((left, right) => String(left).localeCompare(String(right)));
+  return { user_low_id: userLowId, user_high_id: userHighId };
+};
 
 export async function upsertProfile(profile) {
   const payload = mapProfileInsert(profile);
@@ -311,6 +347,7 @@ export async function createNotification(notification) {
     from_user_id: notification.fromUserId,
     from_user_name: notification.fromUserName,
     post_id: notification.postId || null,
+    friend_request_id: notification.friendRequestId || null,
     read: notification.read || false,
   };
 
@@ -343,18 +380,322 @@ export async function markAllNotificationsRead(userId) {
   if (error) throw error;
 }
 
-export async function listFeedPosts(currentUserId, limitCount = 50) {
-  const profile = await getProfileById(currentUserId);
-  if (!profile) return [];
-  const authorsToShow = [...(profile.following || []), currentUserId];
-  if ((profile.following || []).length === 0) {
-    return listRecentPosts(limitCount);
+const fetchFriendRequestByPair = async (requesterId, receiverId) => {
+  const { data, error } = await supabase
+    .from('friend_requests')
+    .select('*')
+    .eq('requester_id', requesterId)
+    .eq('receiver_id', receiverId)
+    .maybeSingle();
+
+  if (error) throw error;
+  return normalizeFriendRequest(data);
+};
+
+const fetchFriendRequestBetweenUsers = async (userAId, userBId) => {
+  const { data, error } = await supabase
+    .from('friend_requests')
+    .select('*')
+    .or(
+      `and(requester_id.eq.${userAId},receiver_id.eq.${userBId}),and(requester_id.eq.${userBId},receiver_id.eq.${userAId})`
+    )
+    .order('created_at', { ascending: false })
+    .limit(1);
+
+  if (error) throw error;
+  return normalizeFriendRequest((data || [])[0] || null);
+};
+
+const fetchFriendshipBetweenUsers = async (userAId, userBId) => {
+  const [userLowId, userHighId] = [userAId, userBId].sort((left, right) => String(left).localeCompare(String(right)));
+
+  const { data, error } = await supabase
+    .from('friendships')
+    .select('*')
+    .eq('user_low_id', userLowId)
+    .eq('user_high_id', userHighId)
+    .maybeSingle();
+
+  if (error) throw error;
+  return normalizeFriendship(data);
+};
+
+export async function getFriendRelation(userId, otherUserId) {
+  if (!userId || !otherUserId || userId === otherUserId) {
+    return { status: 'none', request: null, friendship: null };
   }
+
+  const friendship = await fetchFriendshipBetweenUsers(userId, otherUserId);
+  if (friendship) {
+    return { status: 'friends', request: null, friendship };
+  }
+
+  const request = await fetchFriendRequestBetweenUsers(userId, otherUserId);
+  if (!request) {
+    return { status: 'none', request: null, friendship: null };
+  }
+
+  if (request.requesterId === userId) {
+    if (request.status === 'pending') {
+      return { status: 'outgoing_pending', request, friendship: null };
+    }
+    if (request.status === 'accepted') {
+      return { status: 'accepted_without_friendship', request, friendship: null };
+    }
+    return { status: 'none', request, friendship: null };
+  }
+
+  if (request.receiverId === userId) {
+    if (request.status === 'pending') {
+      return { status: 'incoming_pending', request, friendship: null };
+    }
+    if (request.status === 'accepted') {
+      return { status: 'accepted_without_friendship', request, friendship: null };
+    }
+    return { status: 'none', request, friendship: null };
+  }
+
+  return { status: 'none', request, friendship: null };
+}
+
+export async function listFriendIds(userId) {
+  if (!userId) return [];
+
+  const [lowResult, highResult] = await Promise.all([
+    supabase.from('friendships').select('*').eq('user_low_id', userId),
+    supabase.from('friendships').select('*').eq('user_high_id', userId),
+  ]);
+
+  if (lowResult.error) throw lowResult.error;
+  if (highResult.error) throw highResult.error;
+
+  const rows = [...(lowResult.data || []), ...(highResult.data || [])].map(normalizeFriendship);
+  const ids = rows.map((row) => (row.userLowId === userId ? row.userHighId : row.userLowId));
+  return Array.from(new Set(ids.filter(Boolean)));
+}
+
+export async function listFriendProfiles(userId) {
+  const friendIds = await listFriendIds(userId);
+  if (!friendIds.length) return [];
+
+  const { data, error } = await supabase.from('profiles').select('*').in('id', friendIds).order('name', { ascending: true });
+  if (error) throw error;
+  return (data || []).map(normalizeProfile);
+}
+
+export async function areUsersFriends(userId, otherUserId) {
+  const relation = await getFriendRelation(userId, otherUserId);
+  return relation.status === 'friends';
+}
+
+export async function listIncomingFriendRequests(userId) {
+  const { data, error } = await supabase
+    .from('friend_requests')
+    .select('*')
+    .eq('receiver_id', userId)
+    .eq('status', 'pending')
+    .order('created_at', { ascending: false });
+
+  if (error) throw error;
+  return (data || []).map(normalizeFriendRequest);
+}
+
+export async function listOutgoingFriendRequests(userId) {
+  const { data, error } = await supabase
+    .from('friend_requests')
+    .select('*')
+    .eq('requester_id', userId)
+    .eq('status', 'pending')
+    .order('created_at', { ascending: false });
+
+  if (error) throw error;
+  return (data || []).map(normalizeFriendRequest);
+}
+
+export async function sendFriendRequest(requesterId, receiverId) {
+  if (!requesterId || !receiverId) {
+    throw new Error('Missing friend request participants.');
+  }
+
+  if (requesterId === receiverId) {
+    throw new Error('You cannot send a friend request to yourself.');
+  }
+
+  const relation = await getFriendRelation(requesterId, receiverId);
+  if (relation.status === 'friends') {
+    return relation;
+  }
+
+  if (relation.status === 'incoming_pending') {
+    throw new Error('This user already sent you a friend request. Accept it instead.');
+  }
+
+  const requesterProfile = await getProfileById(requesterId);
+  const payload = mapFriendRequestInsert({
+    requesterId,
+    receiverId,
+    status: 'pending',
+  });
+
+  const { data, error } = await supabase
+    .from('friend_requests')
+    .upsert(payload, { onConflict: 'requester_id,receiver_id' })
+    .select('*')
+    .single();
+
+  if (error) throw error;
+
+  const request = normalizeFriendRequest(data);
+
+  await createNotification({
+    userId: receiverId,
+    type: 'friend_request',
+    fromUserId: requesterId,
+    fromUserName: requesterProfile?.name || requesterProfile?.email?.split('@')?.[0] || 'Someone',
+    friendRequestId: request.id,
+    read: false,
+  }).catch((notificationError) => {
+    console.error('Error creating friend request notification:', notificationError);
+  });
+
+  return request;
+}
+
+export async function acceptFriendRequest(requestId) {
+  if (!requestId) {
+    throw new Error('Missing friend request id.');
+  }
+
+  const { data: requestData, error: fetchError } = await supabase
+    .from('friend_requests')
+    .select('*')
+    .eq('id', requestId)
+    .maybeSingle();
+
+  if (fetchError) throw fetchError;
+  const request = normalizeFriendRequest(requestData);
+  if (!request) throw new Error('Friend request not found.');
+
+  const updatedPayload = {
+    status: 'accepted',
+    responded_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  const { data: updatedRequestData, error: updateError } = await supabase
+    .from('friend_requests')
+    .update(updatedPayload)
+    .eq('id', requestId)
+    .select('*')
+    .single();
+
+  if (updateError) throw updateError;
+
+  const acceptedRequest = normalizeFriendRequest(updatedRequestData);
+  const friendshipPayload = mapFriendshipInsert(acceptedRequest.requesterId, acceptedRequest.receiverId);
+  const { error: friendshipError } = await supabase
+    .from('friendships')
+    .upsert(friendshipPayload, { onConflict: 'user_low_id,user_high_id' });
+
+  if (friendshipError) throw friendshipError;
+
+  const receiverProfile = await getProfileById(acceptedRequest.receiverId).catch(() => null);
+  await createNotification({
+    userId: acceptedRequest.requesterId,
+    type: 'friend_request_accepted',
+    fromUserId: acceptedRequest.receiverId,
+    fromUserName: receiverProfile?.name || receiverProfile?.email?.split('@')?.[0] || 'Someone',
+    friendRequestId: acceptedRequest.id,
+    read: false,
+  }).catch((notificationError) => {
+    console.error('Error creating friend request accepted notification:', notificationError);
+  });
+
+  return acceptedRequest;
+}
+
+export async function rejectFriendRequest(requestId) {
+  if (!requestId) {
+    throw new Error('Missing friend request id.');
+  }
+
+  const { data: requestData, error: fetchError } = await supabase
+    .from('friend_requests')
+    .select('*')
+    .eq('id', requestId)
+    .maybeSingle();
+
+  if (fetchError) throw fetchError;
+  const request = normalizeFriendRequest(requestData);
+  if (!request) throw new Error('Friend request not found.');
+
+  const updatedPayload = {
+    status: 'rejected',
+    responded_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  const { data: updatedRequestData, error: updateError } = await supabase
+    .from('friend_requests')
+    .update(updatedPayload)
+    .eq('id', requestId)
+    .select('*')
+    .single();
+
+  if (updateError) throw updateError;
+
+  const rejectedRequest = normalizeFriendRequest(updatedRequestData);
+  const receiverProfile = await getProfileById(rejectedRequest.receiverId).catch(() => null);
+
+  await createNotification({
+    userId: rejectedRequest.requesterId,
+    type: 'friend_request_rejected',
+    fromUserId: rejectedRequest.receiverId,
+    fromUserName: receiverProfile?.name || receiverProfile?.email?.split('@')?.[0] || 'Someone',
+    friendRequestId: rejectedRequest.id,
+    read: false,
+  }).catch((notificationError) => {
+    console.error('Error creating friend request rejected notification:', notificationError);
+  });
+
+  return rejectedRequest;
+}
+
+export async function removeFriend(userId, friendId) {
+  if (!userId || !friendId) {
+    throw new Error('Missing friend ids.');
+  }
+
+  const [userLowId, userHighId] = [userId, friendId].sort((left, right) => String(left).localeCompare(String(right)));
+
+  const { error } = await supabase
+    .from('friendships')
+    .delete()
+    .eq('user_low_id', userLowId)
+    .eq('user_high_id', userHighId);
+
+  if (error) throw error;
+
+  const currentUserProfile = await getProfileById(userId).catch(() => null);
+  await createNotification({
+    userId: friendId,
+    type: 'friend_removed',
+    fromUserId: userId,
+    fromUserName: currentUserProfile?.name || currentUserProfile?.email?.split('@')?.[0] || 'Someone',
+    read: false,
+  }).catch((notificationError) => {
+    console.error('Error creating friend removed notification:', notificationError);
+  });
+}
+
+export async function listFeedPosts(currentUserId, limitCount = 50) {
+  const friendIds = await listFriendIds(currentUserId);
+  if (!friendIds.length) return [];
 
   const { data, error } = await supabase
     .from('posts')
     .select('*')
-    .in('author_id', authorsToShow.slice(0, 10))
+    .in('author_id', friendIds)
     .order('created_at', { ascending: false })
     .limit(limitCount);
   if (error) throw error;

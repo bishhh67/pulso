@@ -1,5 +1,14 @@
 import React, { useState } from 'react';
-import { StyleSheet, TextInput, Image, Alert, ActivityIndicator, ScrollView, View, Pressable } from 'react-native';
+import {
+  StyleSheet,
+  TextInput,
+  Image,
+  Alert,
+  ActivityIndicator,
+  ScrollView,
+  View,
+  Pressable,
+} from 'react-native';
 import { useRouter } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
@@ -22,10 +31,10 @@ export default function CreatePost() {
   const theme = Colors[colorScheme] ?? Colors.light;
 
   const [content, setContent] = useState('');
-  const [image, setImage] = useState(null);
+  const [media, setMedia] = useState(null);
   const [uploading, setUploading] = useState(false);
 
-  const pickImage = async () => {
+  const pickMedia = async (kind) => {
     try {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
@@ -34,37 +43,45 @@ export default function CreatePost() {
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: true,
-        aspect: [4, 3],
-        quality: 0.7,
+        mediaTypes: kind === 'video' ? ['videos'] : ['images'],
+        allowsEditing: kind !== 'video',
+        aspect: kind !== 'video' ? [4, 3] : undefined,
+        quality: kind !== 'video' ? 0.7 : 1,
       });
 
       if (!result.canceled && result.assets[0]) {
-        setImage(result.assets[0].uri);
+        const asset = result.assets[0];
+        setMedia({
+          uri: asset.uri,
+          kind,
+          fileName: asset.fileName || `${kind}_${Date.now()}.${kind === 'video' ? 'mp4' : 'jpg'}`,
+          contentType:
+            asset.mimeType ||
+            (kind === 'video' ? 'video/mp4' : 'image/jpeg'),
+        });
       }
     } catch (error) {
       console.error('Error picking image:', error);
-      Alert.alert('Error', 'Failed to pick image');
+      Alert.alert('Error', `Failed to pick ${kind}`);
     }
   };
 
-  const uploadImageToStorage = async (imageUri) => {
+  const uploadMediaToStorage = async (pickedMedia) => {
     try {
       return await uploadFile({
-        uri: imageUri,
-        fileName: `post_${Date.now()}.jpg`,
-        contentType: 'image/jpeg',
+        uri: pickedMedia.uri,
+        fileName: pickedMedia.fileName,
+        contentType: pickedMedia.contentType,
       }, 'posts');
     } catch (error) {
       console.error('Storage upload error:', error);
-      throw new Error('Failed to upload image');
+      throw new Error(`Failed to upload ${pickedMedia.kind}`);
     }
   };
 
   const handlePost = async () => {
-    if (!content.trim() && !image) {
-      Alert.alert('Empty Post', 'Please add some text or an image');
+    if (!content.trim() && !media) {
+      Alert.alert('Empty Post', 'Please add some text, an image, or a video');
       return;
     }
 
@@ -77,8 +94,18 @@ export default function CreatePost() {
       setUploading(true);
 
       let imagePath = null;
-      if (image) {
-        imagePath = await uploadImageToStorage(image);
+      let videoPath = null;
+      if (media) {
+        const uploadedPath = await uploadMediaToStorage(media);
+        console.log('[post] uploaded media path:', {
+          kind: media.kind,
+          uploadedPath,
+        });
+        if (media.kind === 'video') {
+          videoPath = uploadedPath;
+        } else {
+          imagePath = uploadedPath;
+        }
       }
 
       await createPost({
@@ -86,9 +113,16 @@ export default function CreatePost() {
         authorType: 'user',
         content: content.trim(),
         imagePath,
+        video: videoPath,
         likes: [],
         comments: [],
         shares: 0,
+      });
+
+      console.log('[post] created post payload:', {
+        authorId: auth.currentUser.uid,
+        imagePath,
+        videoPath,
       });
 
       Alert.alert('Success', 'Post created successfully! 🎉');
@@ -113,10 +147,10 @@ export default function CreatePost() {
 
         <ThemedButton
           onPress={handlePost}
-          disabled={uploading || (!content.trim() && !image)}
+          disabled={uploading || (!content.trim() && !media)}
           style={[
             styles.postButton,
-            { backgroundColor: (!content.trim() && !image) ? theme.uiBackground : '#007AFF' }
+            { backgroundColor: (!content.trim() && !media) ? theme.uiBackground : '#007AFF' }
           ]}
         >
           {uploading ? (
@@ -124,7 +158,7 @@ export default function CreatePost() {
           ) : (
             <ThemedText style={[
               styles.postButtonText,
-              { color: (!content.trim() && !image) ? theme.iconColor : '#fff' }
+              { color: (!content.trim() && !media) ? theme.iconColor : '#fff' }
             ]}>
               Post
             </ThemedText>
@@ -148,13 +182,28 @@ export default function CreatePost() {
         />
 
         {/* Image Preview */}
-        {image && (
+        {media && media.kind === 'image' && (
           <View style={styles.imagePreview}>
-            <Image source={{ uri: image }} style={styles.previewImage} />
+            <Image source={{ uri: media.uri }} style={styles.previewImage} />
             <Pressable
               style={styles.removeImageButton}
-              onPress={() => setImage(null)}
+              onPress={() => setMedia(null)}
             >
+              <Ionicons name="close-circle" size={32} color="#fff" />
+            </Pressable>
+          </View>
+        )}
+
+        {media && media.kind === 'video' && (
+          <View style={styles.videoPreview}>
+            <View style={styles.videoPreviewIcon}>
+              <Ionicons name="videocam" size={42} color="#fff" />
+            </View>
+            <View style={styles.videoPreviewText}>
+              <ThemedText style={styles.videoPreviewTitle}>Video selected</ThemedText>
+              <ThemedText style={styles.videoPreviewSubtitle}>{media.fileName}</ThemedText>
+            </View>
+            <Pressable style={styles.removeVideoButton} onPress={() => setMedia(null)}>
               <Ionicons name="close-circle" size={32} color="#fff" />
             </Pressable>
           </View>
@@ -167,13 +216,13 @@ export default function CreatePost() {
 
         <View style={styles.actionButtons}>
           {/* Image Button */}
-          <ThemedButton onPress={pickImage} style={styles.actionButton}>
+          <ThemedButton onPress={() => pickMedia('image')} style={styles.actionButton}>
             <Ionicons name="image-outline" size={28} color="#4CAF50" />
           </ThemedButton>
 
-          {/* Video Button (Coming Soon) */}
-          <ThemedButton 
-            onPress={() => Alert.alert('Coming Soon', 'Video upload will be available soon')}
+          {/* Video Button */}
+          <ThemedButton
+            onPress={() => pickMedia('video')}
             style={styles.actionButton}
           >
             <Ionicons name="videocam-outline" size={28} color="#F44336" />
@@ -242,12 +291,52 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     position: 'relative',
   },
+  videoPreview: {
+    marginTop: 20,
+    borderRadius: 12,
+    overflow: 'hidden',
+    position: 'relative',
+    minHeight: 160,
+    backgroundColor: '#111827',
+    padding: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+  },
   previewImage: {
     width: '100%',
     height: 300,
     borderRadius: 12,
   },
+  videoPreviewIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#EF4444',
+  },
+  videoPreviewText: {
+    flex: 1,
+  },
+  videoPreviewTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  videoPreviewSubtitle: {
+    color: '#cbd5e1',
+    marginTop: 6,
+    fontSize: 13,
+  },
   removeImageButton: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    borderRadius: 16,
+  },
+  removeVideoButton: {
     position: 'absolute',
     top: 10,
     right: 10,

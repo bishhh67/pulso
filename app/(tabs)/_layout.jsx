@@ -170,6 +170,17 @@ const TabsLayout = () => {
                   <Ionicons name={searchActive ? 'close' : 'search'} size={26} color={theme.iconColor} />
                 </ThemedButton>
 
+                <Pressable onPress={() => router.push('/notifications')} style={styles.iconButton}>
+                  <Ionicons name="notifications-outline" size={26} color={theme.iconColor} />
+                  {unreadCount > 0 && (
+                    <View style={styles.badge}>
+                      <ThemedText style={styles.badgeText}>
+                        {unreadCount > 9 ? '9+' : unreadCount}
+                      </ThemedText>
+                    </View>
+                  )}
+                </Pressable>
+
                 <ThemedButton onPress={() => router.push('/profile')} style={styles.iconButton}>
                   <Ionicons name="menu" size={26} color={theme.iconColor} />
                 </ThemedButton>

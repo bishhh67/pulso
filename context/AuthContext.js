@@ -3,7 +3,7 @@ import { createContext, useContext, useEffect, useState } from 'react';
 import {
   auth,
   signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
+  signUpWithEmailAndPassword,
   signOut,
   onAuthStateChanged,
   initializeAuth,
@@ -17,14 +17,28 @@ export function AuthProvider({ children }) {
 
   useEffect(() => {
     let unsubscribe = () => {};
-    initializeAuth().then(() => {
-      unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-        setUser(currentUser);
-        setLoading(false);
-      });
-    });
+    let mounted = true;
 
-    return () => unsubscribe();
+    initializeAuth()
+      .then(() => {
+        if (!mounted) return;
+        unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+          setUser(currentUser);
+          setLoading(false);
+        });
+      })
+      .catch((error) => {
+        console.error('Auth initialization failed:', error);
+        if (mounted) {
+          setUser(null);
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      mounted = false;
+      unsubscribe();
+    };
   }, []);
 
   const login = async (email, password) => {
@@ -34,9 +48,7 @@ export function AuthProvider({ children }) {
   };
 
   const signup = async (email, password) => {
-    const result = await createUserWithEmailAndPassword(auth, email, password);
-    setUser(result.session ? result.user : null);
-    return result;
+    return signUpWithEmailAndPassword(auth, email, password);
   };
 
   const logout = async () => {

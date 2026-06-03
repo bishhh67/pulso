@@ -11,7 +11,16 @@ import { Ionicons } from '@expo/vector-icons';
 import { useColorScheme } from 'react-native';
 import { Colors } from '../../constants/colors';
 import { auth } from '../../services/supabase/auth';
-import { getProfileById, listAuthorPosts, updateProfile } from '../../services/supabase/data';
+import {
+  acceptFriendRequest,
+  getFriendRelation,
+  getProfileById,
+  listAuthorPosts,
+  listFriendIds,
+  rejectFriendRequest,
+  removeFriend,
+  sendFriendRequest,
+} from '../../services/supabase/data';
 import { getFileUrl } from '../../src/storage/storageProvider';
 
 const windowWidth = Dimensions.get('window').width;
@@ -24,7 +33,8 @@ export default function UserProfile() {
 
   const [userData, setUserData] = useState(null);
   const [userPosts, setUserPosts] = useState([]);
-  const [isFollowing, setIsFollowing] = useState(false);
+  const [friendRelation, setFriendRelation] = useState({ status: 'none', request: null, friendship: null });
+  const [friendCount, setFriendCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [postDetailModalVisible, setPostDetailModalVisible] = useState(false);
   const [commentModalVisible, setCommentModalVisible] = useState(false);
@@ -47,12 +57,13 @@ export default function UserProfile() {
       const data = await getProfileById(userId);
       if (data) {
         setUserData(data);
+        const friends = await listFriendIds(userId);
+        setFriendCount(friends.length);
 
-        // Check if current user is following this user
         if (auth.currentUser && auth.currentUser.uid !== userId) {
-          const currentUserDoc = await getProfileById(auth.currentUser.uid);
-          const following = currentUserDoc?.following || [];
-          setIsFollowing(following.includes(userId));
+          setFriendRelation(await getFriendRelation(auth.currentUser.uid, userId));
+        } else {
+          setFriendRelation({ status: 'none', request: null, friendship: null });
         }
       } else {
         Alert.alert('Error', 'User not found');
@@ -84,59 +95,87 @@ export default function UserProfile() {
     setCommentModalVisible(true);
   };
 
-  // Follow/Unfollow user
-  const handleFollowToggle = async () => {
+  const refreshProfileState = async () => {
+    const updatedProfile = await getProfileById(userId);
+    if (updatedProfile) {
+      setUserData(updatedProfile);
+      const friends = await listFriendIds(userId);
+      setFriendCount(friends.length);
+    }
+    if (auth.currentUser && auth.currentUser.uid !== userId) {
+      setFriendRelation(await getFriendRelation(auth.currentUser.uid, userId));
+    }
+  };
+
+  const handleSendFriendRequest = async () => {
     try {
       if (!auth.currentUser) {
-        Alert.alert('Login Required', 'Please log in to follow users');
+        Alert.alert('Login Required', 'Please log in to send friend requests');
         return;
       }
 
       if (auth.currentUser.uid === userId) {
-        Alert.alert('Error', 'You cannot follow yourself');
+        Alert.alert('Error', 'You cannot send a friend request to yourself');
         return;
       }
 
-      if (isFollowing) {
-        const currentUserDoc = await getProfileById(auth.currentUser.uid);
-        const targetUserDoc = await getProfileById(userId);
-        await updateProfile(auth.currentUser.uid, {
-          following: (currentUserDoc?.following || []).filter((id) => id !== userId),
-        });
-        await updateProfile(userId, {
-          followers: (targetUserDoc?.followers || []).filter((id) => id !== auth.currentUser.uid),
-        });
-        
-        setIsFollowing(false);
-        
-        // Update local userData to reflect new follower count
-        setUserData(prev => ({
-          ...prev,
-          followers: prev.followers?.filter(id => id !== auth.currentUser.uid) || []
-        }));
-        
-      } else {
-        const currentUserDoc = await getProfileById(auth.currentUser.uid);
-        const targetUserDoc = await getProfileById(userId);
-        await updateProfile(auth.currentUser.uid, {
-          following: Array.from(new Set([...(currentUserDoc?.following || []), userId])),
-        });
-        await updateProfile(userId, {
-          followers: Array.from(new Set([...(targetUserDoc?.followers || []), auth.currentUser.uid])),
-        });
-        
-        setIsFollowing(true);
-        
-        // Update local userData to reflect new follower count
-        setUserData(prev => ({
-          ...prev,
-          followers: [...(prev.followers || []), auth.currentUser.uid]
-        }));
-      }
-
+      await sendFriendRequest(auth.currentUser.uid, userId);
+      await refreshProfileState();
+      Alert.alert('Friend request sent', `Your request was sent to ${userData?.name || 'this user'}`);
     } catch (error) {
-      console.error('Error toggling follow:', error);
-      Alert.alert('Error', 'Failed to update follow status. Please try again.');
+      console.error('Error sending friend request:', error);
+      Alert.alert('Error', error.message || 'Failed to send friend request. Please try again.');
+    }
+  };
+
+  const handleAcceptRequest = async () => {
+    try {
+      const requestId = friendRelation.request?.id;
+      if (!requestId) return;
+      await acceptFriendRequest(requestId);
+      await refreshProfileState();
+      Alert.alert('Friend request accepted', `${userData?.name || 'This user'} is now your friend.`);
+    } catch (error) {
+      console.error('Error accepting friend request:', error);
+      Alert.alert('Error', 'Failed to accept friend request.');
+    }
+  };
+
+  const handleRejectRequest = async () => {
+    try {
+      const requestId = friendRelation.request?.id;
+      if (!requestId) return;
+      await rejectFriendRequest(requestId);
+      await refreshProfileState();
+      Alert.alert('Friend request rejected', 'The request was rejected.');
+    } catch (error) {
+      console.error('Error rejecting friend request:', error);
+      Alert.alert('Error', 'Failed to reject friend request.');
+    }
+  };
+
+  const handleRemoveFriend = async () => {
+    try {
+      if (!auth.currentUser) return;
+      Alert.alert('Remove Friend', `Remove ${userData?.name || 'this user'} from your friends?`, [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await removeFriend(auth.currentUser.uid, userId);
+              await refreshProfileState();
+              Alert.alert('Friend removed', `${userData?.name || 'This user'} was removed from your friends.`);
+            } catch (removeError) {
+              console.error('Error removing friend:', removeError);
+              Alert.alert('Error', 'Failed to remove friend.');
+            }
+          },
+        },
+      ]);
+    } catch (error) {
+      console.error('Error preparing remove friend:', error);
     }
   };
 
@@ -156,8 +195,9 @@ export default function UserProfile() {
     );
   }
 
-  const followers = userData.followers?.length || 0;
-  const following = userData.following?.length || 0;
+  const isFriend = friendRelation.status === 'friends';
+  const incomingRequest = friendRelation.status === 'incoming_pending';
+  const outgoingRequest = friendRelation.status === 'outgoing_pending';
   const isOwnProfile = auth.currentUser?.uid === userId;
 
   return (
@@ -191,12 +231,8 @@ export default function UserProfile() {
             <ThemedText style={styles.statLabel}>Posts</ThemedText>
           </View>
           <View style={styles.stat}>
-            <ThemedText title style={styles.statNumber}>{followers}</ThemedText>
-            <ThemedText style={styles.statLabel}>Followers</ThemedText>
-          </View>
-          <View style={styles.stat}>
-            <ThemedText title style={styles.statNumber}>{following}</ThemedText>
-            <ThemedText style={styles.statLabel}>Following</ThemedText>
+            <ThemedText title style={styles.statNumber}>{friendCount}</ThemedText>
+            <ThemedText style={styles.statLabel}>Friends</ThemedText>
           </View>
         </View>
       </View>
@@ -211,23 +247,63 @@ export default function UserProfile() {
 
       <Spacer height={16} />
 
-      {/* Follow/Following Button (only if not own profile) */}
+      {/* Friend actions (only if not own profile) */}
       {!isOwnProfile && (
         <>
-          <ThemedButton
-            onPress={handleFollowToggle}
-            style={[
-              styles.followButton,
-              { backgroundColor: isFollowing ? theme.uiBackground : '#007AFF' }
-            ]}
-          >
-            <ThemedText style={[
-              styles.followButtonText,
-              { color: isFollowing ? theme.text : '#fff' }
-            ]}>
-              {isFollowing ? 'Following' : 'Follow'}
-            </ThemedText>
-          </ThemedButton>
+          {incomingRequest ? (
+            <View style={styles.friendActionRow}>
+              <ThemedButton
+                onPress={handleRejectRequest}
+                style={[styles.friendButton, { backgroundColor: theme.uiBackground }]}
+              >
+                <ThemedText style={[styles.friendButtonText, { color: theme.text }]}>Reject</ThemedText>
+              </ThemedButton>
+              <ThemedButton
+                onPress={handleAcceptRequest}
+                style={[styles.friendButton, { backgroundColor: '#007AFF' }]}
+              >
+                <ThemedText style={[styles.friendButtonText, { color: '#fff' }]}>Accept</ThemedText>
+              </ThemedButton>
+            </View>
+          ) : outgoingRequest ? (
+            <ThemedButton
+              disabled
+              style={[styles.friendButton, { backgroundColor: theme.uiBackground, opacity: 0.85 }]}
+            >
+              <ThemedText style={[styles.friendButtonText, { color: theme.text }]}>Request Sent</ThemedText>
+            </ThemedButton>
+          ) : isFriend ? (
+            <View style={styles.friendActionRow}>
+              <ThemedButton
+                onPress={() => router.push({
+                  pathname: '/chat/directMessage',
+                  params: {
+                    otherUserId: userId,
+                    otherUserName: userData?.name || 'User',
+                    otherUserPhoto: userData?.profilePhotoPath || userData?.profilePhoto || '',
+                  },
+                })}
+                style={[styles.friendButton, { backgroundColor: '#007AFF' }]}
+              >
+                <ThemedText style={[styles.friendButtonText, { color: '#fff' }]}>Message</ThemedText>
+              </ThemedButton>
+              <ThemedButton
+                onPress={handleRemoveFriend}
+                style={[styles.friendButton, { backgroundColor: theme.uiBackground }]}
+              >
+                <ThemedText style={[styles.friendButtonText, { color: theme.text }]}>Remove Friend</ThemedText>
+              </ThemedButton>
+            </View>
+          ) : (
+            <ThemedButton
+              onPress={handleSendFriendRequest}
+              style={[styles.friendButton, { backgroundColor: '#007AFF' }]}
+            >
+              <ThemedText style={[styles.friendButtonText, { color: '#fff' }]}>
+                Send Friend Request
+              </ThemedText>
+            </ThemedButton>
+          )}
           <Spacer height={16} />
         </>
       )}
@@ -366,13 +442,18 @@ const styles = StyleSheet.create({
     opacity: 0.8,
   },
 
-  // FOLLOW BUTTON
-  followButton: {
+  // FRIEND ACTIONS
+  friendActionRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  friendButton: {
     borderRadius: 8,
     paddingVertical: 10,
     alignItems: 'center',
+    flex: 1,
   },
-  followButtonText: {
+  friendButtonText: {
     fontWeight: '600',
     fontSize: 15,
   },

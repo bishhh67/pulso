@@ -15,7 +15,7 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier" : "com.galaxies.pulchowkapp"
+      "bundleIdentifier": "com.galaxies.pulchowkapp"
     },
     "android": {
       "adaptiveIcon": {
@@ -23,7 +23,7 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "package" : "com.galaxies.pulchowkapp"
+      "package": "com.galaxies.pulchowkapp"
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -31,13 +31,14 @@
     "plugins": [
       "expo-router",
       [
-        "expo-build-properties" ,
+        "expo-build-properties",
         {
           "ios": {
-          "useFrameworks":"static"
-          } 
+            "useFrameworks": "static"
+          }
         }
-      ]
+      ],
+      "expo-video"
     ]
   }
 }

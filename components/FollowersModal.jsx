@@ -2,14 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { Modal, View, StyleSheet, FlatList, Pressable, Image } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { getProfileById, getClubById } from '../services/supabase/data';
+import { getProfileById } from '../services/supabase/data';
 import { getFileUrl } from '../src/storage/storageProvider';
 import ThemedView from './ThemedView';
 import ThemedText from './ThemedText';
 import { useColorScheme } from 'react-native';
 import { Colors } from '../constants/colors';
 
-export default function FollowersModal({ visible, onClose, followIds, type, currentUserId }) {
+export default function FriendsModal({ visible, onClose, friendIds, currentUserId }) {
   const router = useRouter();
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme] ?? Colors.light;
@@ -18,31 +18,22 @@ export default function FollowersModal({ visible, onClose, followIds, type, curr
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (visible && followIds?.length > 0) {
+    if (visible && friendIds?.length > 0) {
       loadItems();
     } else {
       setItems([]);
       setLoading(false);
     }
-  }, [visible, followIds]);
+  }, [visible, friendIds]);
 
   const loadItems = async () => {
     try {
       setLoading(true);
 
-      // Load both users and clubs
-      const itemPromises = followIds.map(async (id) => {
+      const itemPromises = friendIds.map(async (id) => {
         const user = await getProfileById(id).catch(() => null);
-        if (user) {
-          return { id, type: 'user', ...user };
-        }
-
-        const club = await getClubById(id).catch(() => null);
-        if (club) {
-          return { id, type: 'club', ...club };
-        }
-
-        return null;
+        if (!user) return null;
+        return { id, type: 'user', ...user };
       });
 
       const loadedItems = await Promise.all(itemPromises);
@@ -56,13 +47,8 @@ export default function FollowersModal({ visible, onClose, followIds, type, curr
 
   const handleItemPress = (item) => {
     onClose();
-    if (item.type === 'user') {
-      if (item.id === currentUserId) {
-        return; // Already on own profile
-      }
+    if (item.id !== currentUserId) {
       router.push(`/profile/${item.id}`);
-    } else if (item.type === 'club') {
-      router.push(`/clubs/${item.id}`);
     }
   };
 
@@ -78,7 +64,7 @@ export default function FollowersModal({ visible, onClose, followIds, type, curr
           {/* Header */}
           <View style={styles.header}>
             <ThemedText title style={styles.title}>
-              {type === 'followers' ? 'Followers' : 'Following'}
+              Friends
             </ThemedText>
             <Pressable onPress={onClose} style={styles.closeButton}>
               <Ionicons name="close" size={28} color={theme.iconColor} />
@@ -92,15 +78,8 @@ export default function FollowersModal({ visible, onClose, followIds, type, curr
             </View>
           ) : items.length === 0 ? (
             <View style={styles.centerContainer}>
-              <Ionicons 
-                name={type === 'followers' ? 'people-outline' : 'person-add-outline'} 
-                size={64} 
-                color={theme.iconColor} 
-                style={{ opacity: 0.3 }} 
-              />
-              <ThemedText style={styles.emptyText}>
-                {type === 'followers' ? 'No followers yet' : 'Not following anyone yet'}
-              </ThemedText>
+              <Ionicons name="people-outline" size={64} color={theme.iconColor} style={{ opacity: 0.3 }} />
+              <ThemedText style={styles.emptyText}>No friends yet</ThemedText>
             </View>
           ) : (
             <FlatList
@@ -116,15 +95,15 @@ export default function FollowersModal({ visible, onClose, followIds, type, curr
                 >
                   <View style={styles.itemInfo}>
                     {/* Avatar/Image */}
-                    {(item.profilePhoto || item.image) ? (
+                    {item.profilePhoto ? (
                       <Image 
-                        source={{ uri: getFileUrl(item.profilePhotoPath || item.profilePhoto || item.imagePath || item.image) }} 
+                        source={{ uri: getFileUrl(item.profilePhotoPath || item.profilePhoto) }} 
                         style={styles.avatar} 
                       />
                     ) : (
                       <View style={[styles.avatar, { backgroundColor: theme.uiBackground }]}>
                         <Ionicons 
-                          name={item.type === 'user' ? 'person' : 'people'} 
+                          name="person" 
                           size={24} 
                           color={theme.iconColor} 
                         />
@@ -136,16 +115,11 @@ export default function FollowersModal({ visible, onClose, followIds, type, curr
                       <ThemedText style={styles.itemName}>
                         {item.name || 'Unnamed'}
                       </ThemedText>
-                      <View style={styles.typeRow}>
-                        <ThemedText style={styles.itemType}>
-                          {item.type === 'user' ? 'User' : 'Club'}
+                      {item.bio && (
+                        <ThemedText style={styles.itemBio} numberOfLines={1}>
+                          {item.bio}
                         </ThemedText>
-                        {item.bio && (
-                          <ThemedText style={styles.itemBio} numberOfLines={1}>
-                            {' • ' + item.bio}
-                          </ThemedText>
-                        )}
-                      </View>
+                      )}
                     </View>
                   </View>
 
