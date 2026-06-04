@@ -8,6 +8,7 @@ import {
   onAuthStateChanged,
   initializeAuth,
 } from '../services/supabase/auth';
+import { registerPushTokenForCurrentUser } from '../services/notifications/push';
 
 const AuthContext = createContext();
 
@@ -40,6 +41,14 @@ export function AuthProvider({ children }) {
       unsubscribe();
     };
   }, []);
+
+  useEffect(() => {
+    if (!user?.uid) return;
+
+    void registerPushTokenForCurrentUser(user.uid).catch((error) => {
+      console.error('Failed to register push token:', error);
+    });
+  }, [user?.uid]);
 
   const login = async (email, password) => {
     const result = await signInWithEmailAndPassword(auth, email, password);

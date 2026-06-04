@@ -26,6 +26,7 @@ const mapSupabaseUser = (user, profile = null) => {
     following: profile?.following || [],
     followers: profile?.followers || [],
     searchHistory: profile?.searchHistory || [],
+    pushTokens: profile?.pushTokens || [],
   };
 };
 
@@ -212,6 +213,7 @@ export async function ensureProfileForUser(user) {
     following: [],
     followers: [],
     searchHistory: [],
+    pushTokens: [],
   });
 }
 

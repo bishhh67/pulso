@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { View, StyleSheet, FlatList, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -8,7 +8,8 @@ import ThemedText from '../../components/ThemedText';
 import ThemedButton from '../../components/ThemedButton';
 import { useColorScheme } from 'react-native';
 import { Colors } from '../../constants/colors';
-import { auth } from '../../services/supabase/auth';
+import { useAuth } from '../../context/AuthContext';
+import { supabase } from '../../services/supabase/client';
 import {
   acceptFriendRequest,
   rejectFriendRequest,
@@ -19,37 +20,75 @@ import {
 
 export default function Notifications() {
   const router = useRouter();
+  const { user } = useAuth();
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme] ?? Colors.light;
 
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
+  const userId = user?.uid;
+  const notificationsChannelRef = useRef(null);
 
-  useEffect(() => {
-    if (!auth.currentUser) {
+  const loadNotifications = async (markViewed = false) => {
+    if (!userId) {
       setLoading(false);
       return;
     }
 
-    const load = async () => {
-      try {
-        const notifs = await listNotifications(auth.currentUser.uid);
-        setNotifications(notifs);
-        setLoading(false);
-      } catch (error) {
-        console.error('Error loading notifications:', error);
-        setLoading(false);
-      }
-    };
+    try {
+      const notifs = await listNotifications(userId);
+      setNotifications(notifs);
 
-    load();
-    const interval = setInterval(load, 5000);
-    return () => clearInterval(interval);
-  }, []);
+      if (markViewed && notifs.length > 0) {
+        await markAllNotificationsRead(userId);
+        setNotifications(notifs.map((notification) => ({ ...notification, read: true })));
+      }
+    } catch (error) {
+      console.error('Error loading notifications:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!userId) {
+      setLoading(false);
+      return;
+    }
+
+    loadNotifications(true);
+
+    if (notificationsChannelRef.current) {
+      void supabase.removeChannel(notificationsChannelRef.current);
+      notificationsChannelRef.current = null;
+    }
+
+    const channelName = `notifications-screen-${userId}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const channel = supabase.channel(channelName);
+    channel.on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'notifications', filter: `user_id=eq.${userId}` },
+      () => {
+        void loadNotifications(false);
+      }
+    );
+    channel.subscribe();
+    notificationsChannelRef.current = channel;
+
+    return () => {
+      if (notificationsChannelRef.current) {
+        void supabase.removeChannel(notificationsChannelRef.current);
+      }
+      notificationsChannelRef.current = null;
+    };
+  }, [userId]);
 
   const markAsRead = async (notificationId) => {
     try {
       await markNotificationRead(notificationId);
+      setNotifications((prev) =>
+        prev.map((notification) => (notification.id === notificationId ? { ...notification, read: true } : notification))
+      );
     } catch (error) {
       console.error('Error marking as read:', error);
     }
@@ -57,7 +96,8 @@ export default function Notifications() {
 
   const markAllAsRead = async () => {
     try {
-      await markAllNotificationsRead(auth.currentUser.uid);
+      if (!userId) return;
+      await markAllNotificationsRead(userId);
       setNotifications((prev) => prev.map((notification) => ({ ...notification, read: true })));
     } catch (error) {
       console.error('Error marking all as read:', error);
@@ -74,16 +114,13 @@ export default function Notifications() {
         await rejectFriendRequest(notification.friendRequestId);
       }
 
-      await markNotificationRead(notification.id);
-      setNotifications((prev) =>
-        prev.map((item) => (item.id === notification.id ? { ...item, read: true } : item))
-      );
+      await loadNotifications(true);
     } catch (error) {
       console.error(`Error ${action}ing friend request:`, error);
     }
   };
 
-  if (!auth.currentUser) {
+  if (!userId) {
     return (
       <ThemedView style={styles.centerContainer}>
         <Ionicons name="notifications-off-outline" size={64} color={theme.iconColor} style={{ opacity: 0.3 }} />

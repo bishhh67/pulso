@@ -19,6 +19,23 @@ create table if not exists public.friendships (
 );
 
 alter table public.notifications add column if not exists friend_request_id uuid;
+alter table public.notifications add column if not exists from_user_photo text;
+
+do $$
+begin
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime')
+     and not exists (
+       select 1
+       from pg_publication_tables pt
+       join pg_class c on c.oid = pt.prrelid
+       join pg_namespace n on n.oid = c.relnamespace
+       where pt.pubname = 'supabase_realtime'
+         and n.nspname = 'public'
+         and c.relname = 'notifications'
+     ) then
+    execute 'alter publication supabase_realtime add table public.notifications';
+  end if;
+end $$;
 
 do $$
 begin
@@ -69,7 +86,37 @@ create policy "Friendships can be created by participants" on public.friendships
 for insert to authenticated
 with check ((select auth.uid()) = user_low_id or (select auth.uid()) = user_high_id);
 
+drop policy if exists "Friendships can be updated by participants" on public.friendships;
+create policy "Friendships can be updated by participants" on public.friendships
+for update to authenticated
+using ((select auth.uid()) = user_low_id or (select auth.uid()) = user_high_id)
+with check ((select auth.uid()) = user_low_id or (select auth.uid()) = user_high_id);
+
 drop policy if exists "Friendships can be deleted by participants" on public.friendships;
 create policy "Friendships can be deleted by participants" on public.friendships
 for delete to authenticated
 using ((select auth.uid()) = user_low_id or (select auth.uid()) = user_high_id);
+
+with legacy_relations as (
+  select distinct
+    p.id as source_user_id,
+    rel.relation_user_id
+  from public.profiles p
+  cross join lateral (
+    select rel_id::uuid as relation_user_id
+    from unnest(coalesce(p.following, '{}'::text[]) || coalesce(p.followers, '{}'::text[])) as rel_id
+    where rel_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+  ) rel
+  join auth.users u on u.id = rel.relation_user_id
+  where rel.relation_user_id <> p.id
+),
+legacy_friendships as (
+  select distinct
+    case when source_user_id < relation_user_id then source_user_id else relation_user_id end as user_low_id,
+    case when source_user_id < relation_user_id then relation_user_id else source_user_id end as user_high_id
+  from legacy_relations
+)
+insert into public.friendships (user_low_id, user_high_id, created_at)
+select user_low_id, user_high_id, now()
+from legacy_friendships
+on conflict (user_low_id, user_high_id) do nothing;

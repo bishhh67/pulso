@@ -9,17 +9,28 @@ import {
   Platform,
   Image,
   ActivityIndicator,
+  Alert,
+  Modal,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { auth } from '../../services/supabase/auth';
-import { areUsersFriends, listDirectMessages, sendDirectMessage } from '../../services/supabase/data';
+import {
+  areUsersFriends,
+  getDirectChatPreference,
+  hideDirectChat,
+  listDirectMessages,
+  muteDirectChat,
+  sendDirectMessage,
+  unmuteDirectChat,
+} from '../../services/supabase/data';
 import ThemedView from '../../components/ThemedView';
 import ThemedText from '../../components/ThemedText';
 import ThemedButton from '../../components/ThemedButton';
 import { getFileUrl } from '../../src/storage/storageProvider';
 import { useColorScheme } from 'react-native';
 import { Colors } from '../../constants/colors';
+import { sendDirectMessagePushNotification } from '../../services/notifications/push';
 
 export default function DirectMessage() {
   const router = useRouter();
@@ -27,43 +38,54 @@ export default function DirectMessage() {
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme] ?? Colors.light;
 
-  const { otherUserId, otherUserName, otherUserPhoto } = params;
+  const otherUserId = String(params.otherUserId || '');
+  const otherUserName = params.otherUserName;
+  const otherUserPhoto = params.otherUserPhoto;
 
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState('');
   const [loading, setLoading] = useState(true);
   const [accessDenied, setAccessDenied] = useState(false);
+  const [menuVisible, setMenuVisible] = useState(false);
+  const [chatPreference, setChatPreference] = useState(null);
   const flatListRef = useRef();
 
   // Create consistent chat ID (sorted user IDs)
-  const chatId = [auth.currentUser?.uid, otherUserId].sort().join('_');
+  const chatId = [String(auth.currentUser?.uid || ''), otherUserId].sort().join('_');
 
-  useEffect(() => {
+  const loadConversation = async () => {
     if (!auth.currentUser || !otherUserId) {
       setLoading(false);
       return;
     }
 
-    const verifyAccessAndLoadMessages = async () => {
-      try {
-        const allowed = await areUsersFriends(auth.currentUser.uid, otherUserId);
-        if (!allowed) {
-          setAccessDenied(true);
-          setLoading(false);
-          return;
-        }
-
-        const messagesList = await listDirectMessages(chatId);
-        setMessages(messagesList);
+    try {
+      const allowed = await areUsersFriends(auth.currentUser.uid, otherUserId);
+      if (!allowed) {
+        setAccessDenied(true);
         setLoading(false);
-      } catch (error) {
-        console.error('Error verifying chat access:', error);
-        setLoading(false);
+        return;
       }
-    };
 
-    verifyAccessAndLoadMessages();
-    const interval = setInterval(verifyAccessAndLoadMessages, 3000);
+      const [messagesList, preference] = await Promise.all([
+        listDirectMessages(chatId),
+        getDirectChatPreference(auth.currentUser.uid, otherUserId),
+      ]);
+
+      setMessages(messagesList);
+      setChatPreference(preference);
+      setLoading(false);
+    } catch (error) {
+      console.error('Error verifying chat access:', error);
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadConversation();
+    const interval = setInterval(() => {
+      void loadConversation();
+    }, 3000);
     return () => clearInterval(interval);
   }, [chatId]);
 
@@ -75,11 +97,21 @@ export default function DirectMessage() {
     setText('');
 
     try {
-      await sendDirectMessage(chatId, {
+      const sentMessage = await sendDirectMessage(chatId, {
         text: messageText,
         sendBy: auth.currentUser.uid,
         sendTo: otherUserId,
         type: 'text',
+      });
+
+      setMessages((prev) => [sentMessage, ...prev]);
+      void sendDirectMessagePushNotification({
+        recipientId: otherUserId,
+        senderId: auth.currentUser.uid,
+        senderName: auth.currentUser.name || auth.currentUser.email?.split('@')?.[0] || 'Someone',
+        senderPhoto: auth.currentUser.profilePhotoPath || auth.currentUser.profilePhoto || null,
+      }).catch((error) => {
+        console.error('Error sending direct message notification:', error);
       });
 
       // Scroll to bottom
@@ -89,6 +121,45 @@ export default function DirectMessage() {
     } catch (error) {
       console.error('Error sending message:', error);
       setText(messageText); // Restore text on error
+    }
+  };
+
+  const handleDeleteChat = () => {
+    Alert.alert(
+      'Delete Chat',
+      'This will hide the conversation from your inbox until a new message arrives.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await hideDirectChat(auth.currentUser.uid, otherUserId);
+              setMenuVisible(false);
+              router.back();
+            } catch (error) {
+              console.error('Error deleting chat:', error);
+              Alert.alert('Error', 'Failed to delete chat');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const handleMuteToggle = async () => {
+    try {
+      if (chatPreference?.mutedAt) {
+        await unmuteDirectChat(auth.currentUser.uid, otherUserId);
+      } else {
+        await muteDirectChat(auth.currentUser.uid, otherUserId);
+      }
+      setMenuVisible(false);
+      await loadConversation();
+    } catch (error) {
+      console.error('Error updating mute state:', error);
+      Alert.alert('Error', 'Failed to update mute settings');
     }
   };
 
@@ -162,9 +233,18 @@ export default function DirectMessage() {
             )}
           </View>
 
-          <ThemedText title style={styles.headerTitle}>
-            {otherUserName || 'User'}
-          </ThemedText>
+          <View style={styles.headerTitleWrap}>
+            <ThemedText title style={styles.headerTitle} numberOfLines={1} ellipsizeMode="tail">
+              {otherUserName || 'User'}
+            </ThemedText>
+            {chatPreference?.mutedAt && (
+              <ThemedText style={styles.mutedLabel}>Muted</ThemedText>
+            )}
+          </View>
+
+          <Pressable onPress={() => setMenuVisible(true)} style={styles.menuButton} hitSlop={8}>
+            <Ionicons name="ellipsis-vertical" size={20} color={theme.iconColor} />
+          </Pressable>
         </View>
 
         {/* Messages */}
@@ -210,6 +290,24 @@ export default function DirectMessage() {
             />
           </Pressable>
         </View>
+
+        <Modal visible={menuVisible} transparent animationType="fade" onRequestClose={() => setMenuVisible(false)}>
+          <Pressable style={styles.menuOverlay} onPress={() => setMenuVisible(false)}>
+            <Pressable style={[styles.menuCard, { backgroundColor: theme.background }]} onPress={() => {}}>
+              <Pressable style={styles.menuItem} onPress={handleDeleteChat}>
+                <Ionicons name="trash-outline" size={18} color="#FF3B30" />
+                <ThemedText style={styles.menuItemTextDanger}>Delete Chat</ThemedText>
+              </Pressable>
+
+              <Pressable style={styles.menuItem} onPress={handleMuteToggle}>
+                <Ionicons name={chatPreference?.mutedAt ? 'volume-high-outline' : 'notifications-off-outline'} size={18} color={theme.iconColor} />
+                <ThemedText style={styles.menuItemText}>
+                  {chatPreference?.mutedAt ? 'Unmute User' : 'Mute User'}
+                </ThemedText>
+              </Pressable>
+            </Pressable>
+          </Pressable>
+        </Modal>
       </ThemedView>
     </KeyboardAvoidingView>
   );
@@ -250,9 +348,21 @@ const styles = StyleSheet.create({
     height: 36,
     borderRadius: 18,
   },
+  headerTitleWrap: {
+    flex: 1,
+    minWidth: 0,
+    marginRight: 8,
+  },
   headerTitle: {
+    flexShrink: 1,
     fontSize: 18,
     fontWeight: '600',
+    maxWidth: '100%',
+  },
+  mutedLabel: {
+    marginTop: 2,
+    fontSize: 12,
+    opacity: 0.5,
   },
   messagesList: {
     paddingHorizontal: 16,
@@ -316,5 +426,40 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  menuButton: {
+    padding: 8,
+    marginLeft: 4,
+  },
+  menuOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    justifyContent: 'flex-start',
+    alignItems: 'flex-end',
+    paddingTop: 72,
+    paddingRight: 12,
+  },
+  menuCard: {
+    minWidth: 180,
+    borderRadius: 12,
+    paddingVertical: 8,
+    overflow: 'hidden',
+    elevation: 6,
+  },
+  menuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  menuItemText: {
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  menuItemTextDanger: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#FF3B30',
   },
 });

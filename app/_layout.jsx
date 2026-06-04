@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { useColorScheme } from 'react-native';
 import * as Linking from 'expo-linking';
+import * as Notifications from 'expo-notifications';
 import { Stack, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 
@@ -8,12 +9,45 @@ import { AuthProvider } from '../context/AuthContext';
 import { Colors } from '../constants/colors';
 import { restoreSessionFromUrl } from '../services/supabase/auth';
 
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
+
 const RootLayout = () => {
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme] ?? Colors.light;
   const router = useRouter();
   const linkingUrl = Linking.useURL();
   const handledUrlRef = useRef(null);
+  const handledNotificationResponseRef = useRef(null);
+
+  const navigateFromNotification = (response) => {
+    const data = response?.notification?.request?.content?.data || {};
+    const notificationId = response?.notification?.request?.identifier || null;
+
+    if (!data?.screen || handledNotificationResponseRef.current === notificationId) {
+      return;
+    }
+
+    handledNotificationResponseRef.current = notificationId;
+
+    if (data.screen === '/chat/directMessage' && data.otherUserId) {
+      router.push({
+        pathname: '/chat/directMessage',
+        params: {
+          otherUserId: String(data.otherUserId),
+          otherUserName: data.otherUserName || 'User',
+          otherUserPhoto: data.otherUserPhoto || '',
+        },
+      });
+    }
+  };
 
   useEffect(() => {
     const processAuthUrl = async (url) => {
@@ -45,6 +79,26 @@ const RootLayout = () => {
 
     void restoreDeepLinkSession();
   }, [linkingUrl, router]);
+
+  useEffect(() => {
+    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
+      navigateFromNotification(response);
+    });
+
+    void Notifications.getLastNotificationResponseAsync()
+      .then((response) => {
+        if (response) {
+          navigateFromNotification(response);
+        }
+      })
+      .catch((error) => {
+        console.error('Failed to handle last notification response:', error);
+      });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [router]);
 
   return (
     <AuthProvider>

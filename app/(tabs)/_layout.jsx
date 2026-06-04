@@ -1,9 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { View, StyleSheet, TextInput, FlatList, Pressable, Keyboard, useColorScheme, Image } from 'react-native';
 import { Tabs, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { auth } from '../../services/supabase/auth';
-import { listNotifications, markNotificationRead, getProfileById, updateProfile, listProfilesExcept, listClubs } from '../../services/supabase/data';
+import { listNotifications, getProfileById, updateProfile, listProfilesExcept, listClubs } from '../../services/supabase/data';
+import { useAuth } from '../../context/AuthContext';
+import { supabase } from '../../services/supabase/client';
 import ThemedLogo from '../../components/ThemedLogo';
 import ThemedText from '../../components/ThemedText';
 import ThemedButton from '../../components/ThemedButton';
@@ -13,11 +15,14 @@ import { getFileUrl } from '../../src/storage/storageProvider';
 
 const TabsLayout = () => {
   const router = useRouter();
-  
+  const { user } = useAuth();
+  const userId = user?.uid;
+
   const [searchActive, setSearchActive] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [searchHistory, setSearchHistory] = useState([]);
+  const badgeChannelRef = useRef(null);
 
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme] ?? Colors.light;
@@ -31,11 +36,11 @@ const TabsLayout = () => {
   const [unreadCount, setUnreadCount] = useState(0);
 
   useEffect(() => {
-    if (!auth.currentUser) return;
+    if (!userId) return;
 
     const loadUnread = async () => {
       try {
-        const notifications = await listNotifications(auth.currentUser.uid);
+        const notifications = await listNotifications(userId);
         setUnreadCount(notifications.filter((n) => !n.read).length);
       } catch (error) {
         console.error('Error loading notifications:', error);
@@ -43,9 +48,30 @@ const TabsLayout = () => {
     };
 
     loadUnread();
-    const interval = setInterval(loadUnread, 5000);
-    return () => clearInterval(interval);
-  }, []);
+    if (badgeChannelRef.current) {
+      void supabase.removeChannel(badgeChannelRef.current);
+      badgeChannelRef.current = null;
+    }
+
+    const channelName = `notifications-badge-${userId}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const channel = supabase.channel(channelName);
+    channel.on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'notifications', filter: `user_id=eq.${userId}` },
+      () => {
+        void loadUnread();
+      }
+    );
+    channel.subscribe();
+    badgeChannelRef.current = channel;
+
+    return () => {
+      if (badgeChannelRef.current) {
+        void supabase.removeChannel(badgeChannelRef.current);
+      }
+      badgeChannelRef.current = null;
+    };
+  }, [userId]);
 
   const loadSearchHistory = async () => {
     try {

@@ -210,6 +210,7 @@ export default function PostCard({ post, onCommentPress, onPostPress }) {
           type: 'like',
           fromUserId: auth.currentUser.uid,
           fromUserName: auth.currentUser.name || auth.currentUser.email?.split('@')?.[0] || 'Someone',
+          fromUserPhoto: auth.currentUser.profilePhotoPath || auth.currentUser.profilePhoto || null,
           postId: post.id,
           read: false,
         });
@@ -254,6 +255,7 @@ export default function PostCard({ post, onCommentPress, onPostPress }) {
           type: 'share',
           fromUserId: auth.currentUser.uid,
           fromUserName: auth.currentUser.name || auth.currentUser.email?.split('@')?.[0] || 'Someone',
+          fromUserPhoto: auth.currentUser.profilePhotoPath || auth.currentUser.profilePhoto || null,
           postId: post.id,
           read: false,
         });

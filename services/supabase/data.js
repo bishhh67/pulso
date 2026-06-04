@@ -13,8 +13,48 @@ const isoTimestamp = (value) => {
 
 const normalizeArray = (value) => (Array.isArray(value) ? value : []);
 
+const normalizeProfileSettings = (value) => {
+  if (Array.isArray(value)) {
+    return {
+      searchHistory: value,
+      pushTokens: [],
+      directMessagePreferences: {},
+    };
+  }
+
+  if (value && typeof value === 'object') {
+    const searchHistory = Array.isArray(value.items)
+      ? value.items
+      : Array.isArray(value.searchHistory)
+        ? value.searchHistory
+        : Array.isArray(value.history)
+          ? value.history
+          : [];
+    const pushTokens = Array.isArray(value.pushTokens) ? value.pushTokens : [];
+    const directMessagePreferences =
+      value.directMessagePreferences && typeof value.directMessagePreferences === 'object'
+        ? value.directMessagePreferences
+        : value.dmPrefs && typeof value.dmPrefs === 'object'
+          ? value.dmPrefs
+          : {};
+
+    return {
+      searchHistory,
+      pushTokens,
+      directMessagePreferences,
+    };
+  }
+
+  return {
+    searchHistory: [],
+    pushTokens: [],
+    directMessagePreferences: {},
+  };
+};
+
 export const normalizeProfile = (row) => {
   if (!row) return null;
+  const profileSettings = normalizeProfileSettings(row.search_history);
   return {
     uid: row.id,
     id: row.id,
@@ -25,7 +65,9 @@ export const normalizeProfile = (row) => {
     profilePhotoPath: row.profile_photo || null,
     following: normalizeArray(row.following),
     followers: normalizeArray(row.followers),
-    searchHistory: normalizeArray(row.search_history),
+    searchHistory: profileSettings.searchHistory,
+    pushTokens: profileSettings.pushTokens,
+    directMessagePreferences: profileSettings.directMessagePreferences,
     createdAt: isoTimestamp(row.created_at),
     updatedAt: isoTimestamp(row.updated_at),
   };
@@ -65,14 +107,18 @@ export const normalizePost = (row) => {
 
 export const normalizeNotification = (row) => {
   if (!row) return null;
+  const friendRequestRaw = row.friend_request || row.friendRequest || null;
+  const friendRequest = Array.isArray(friendRequestRaw) ? friendRequestRaw[0] : friendRequestRaw;
   return {
     id: row.id,
     userId: row.user_id,
     type: row.type,
     fromUserId: row.from_user_id,
     fromUserName: row.from_user_name,
+    fromUserPhoto: row.from_user_photo || null,
     postId: row.post_id,
     friendRequestId: row.friend_request_id,
+    friendRequestStatus: friendRequest?.status || row.friend_request_status || null,
     read: !!row.read,
     createdAt: isoTimestamp(row.created_at),
   };
@@ -130,6 +176,20 @@ export const normalizeMessage = (row) => {
   };
 };
 
+export const normalizeDirectChatPreference = (row) => {
+  if (!row) return null;
+  const mutedAtValue = row.muted_at ?? row.mutedAt ?? null;
+  const hiddenAtValue = row.hidden_at ?? row.hiddenAt ?? null;
+  return {
+    userId: row.user_id,
+    otherUserId: row.other_user_id,
+    mutedAt: isoTimestamp(mutedAtValue),
+    hiddenAt: isoTimestamp(hiddenAtValue),
+    createdAt: isoTimestamp(row.created_at),
+    updatedAt: isoTimestamp(row.updated_at),
+  };
+};
+
 export const normalizeNote = (row) => {
   if (!row) return null;
   return {
@@ -153,7 +213,14 @@ const mapProfileInsert = (profile) => ({
   profile_photo: profile.profilePhotoPath ?? profile.profilePhoto ?? null,
   following: profile.following || [],
   followers: profile.followers || [],
-  search_history: profile.searchHistory || [],
+  search_history: {
+    items: Array.isArray(profile.searchHistory) ? profile.searchHistory : [],
+    pushTokens: Array.isArray(profile.pushTokens) ? profile.pushTokens : [],
+    directMessagePreferences:
+      profile.directMessagePreferences && typeof profile.directMessagePreferences === 'object'
+        ? profile.directMessagePreferences
+        : {},
+  },
 });
 
 const mapClubInsert = (club) => ({
@@ -231,13 +298,39 @@ export async function getProfileById(id) {
 
 export async function updateProfile(id, patch) {
   const payload = {};
+  const needsSettingsMerge =
+    patch.searchHistory !== undefined ||
+    patch.pushTokens !== undefined ||
+    patch.directMessagePreferences !== undefined;
+
+  let currentSettings = null;
+  if (needsSettingsMerge) {
+    const currentProfile = await getProfileById(id).catch(() => null);
+    currentSettings = {
+      searchHistory: currentProfile?.searchHistory || [],
+      pushTokens: currentProfile?.pushTokens || [],
+      directMessagePreferences: currentProfile?.directMessagePreferences || {},
+    };
+  }
+
   if (patch.name !== undefined) payload.name = patch.name;
   if (patch.bio !== undefined) payload.bio = patch.bio;
   if (patch.profilePhotoPath !== undefined) payload.profile_photo = patch.profilePhotoPath;
   if (patch.profilePhoto !== undefined) payload.profile_photo = patch.profilePhoto;
   if (patch.following !== undefined) payload.following = patch.following;
   if (patch.followers !== undefined) payload.followers = patch.followers;
-  if (patch.searchHistory !== undefined) payload.search_history = patch.searchHistory;
+
+  if (needsSettingsMerge) {
+    payload.search_history = {
+      items: patch.searchHistory !== undefined ? patch.searchHistory : currentSettings.searchHistory,
+      pushTokens: patch.pushTokens !== undefined ? patch.pushTokens : currentSettings.pushTokens,
+      directMessagePreferences:
+        patch.directMessagePreferences !== undefined
+          ? patch.directMessagePreferences
+          : currentSettings.directMessagePreferences,
+    };
+  }
+
   payload.updated_at = new Date().toISOString();
 
   const { data, error } = await supabase
@@ -249,6 +342,62 @@ export async function updateProfile(id, patch) {
 
   if (error) throw error;
   return normalizeProfile(data);
+}
+
+export async function getDirectChatPreference(userId, otherUserId) {
+  if (!userId || !otherUserId) return null;
+  const profile = await getProfileById(userId);
+  const preference = profile?.directMessagePreferences?.[otherUserId] || null;
+  return preference ? normalizeDirectChatPreference({ user_id: userId, other_user_id: otherUserId, ...preference }) : null;
+}
+
+export async function listDirectChatPreferences(userId) {
+  if (!userId) return [];
+  const profile = await getProfileById(userId);
+  const preferences = profile?.directMessagePreferences || {};
+  return Object.entries(preferences).map(([otherUserId, preference]) =>
+    normalizeDirectChatPreference({ user_id: userId, other_user_id: otherUserId, ...preference })
+  );
+}
+
+export async function upsertDirectChatPreference(userId, otherUserId, patch = {}) {
+  if (!userId || !otherUserId) {
+    throw new Error('Missing direct chat preference participants.');
+  }
+
+  const profile = await getProfileById(userId);
+  const currentPreferences = profile?.directMessagePreferences || {};
+  const existingPreference = currentPreferences[otherUserId] || {};
+  const nextPreference = {
+    mutedAt: patch.mutedAt === undefined ? existingPreference.mutedAt || null : patch.mutedAt,
+    hiddenAt: patch.hiddenAt === undefined ? existingPreference.hiddenAt || null : patch.hiddenAt,
+  };
+
+  const updatedPreferences = {
+    ...currentPreferences,
+    [otherUserId]: nextPreference,
+  };
+
+  await updateProfile(userId, { directMessagePreferences: updatedPreferences });
+
+  return normalizeDirectChatPreference({
+    user_id: userId,
+    other_user_id: otherUserId,
+    muted_at: nextPreference.mutedAt,
+    hidden_at: nextPreference.hiddenAt,
+  });
+}
+
+export async function muteDirectChat(userId, otherUserId) {
+  return upsertDirectChatPreference(userId, otherUserId, { mutedAt: new Date().toISOString() });
+}
+
+export async function unmuteDirectChat(userId, otherUserId) {
+  return upsertDirectChatPreference(userId, otherUserId, { mutedAt: null });
+}
+
+export async function hideDirectChat(userId, otherUserId) {
+  return upsertDirectChatPreference(userId, otherUserId, { hiddenAt: new Date().toISOString() });
 }
 
 export async function searchProfiles(searchText, currentUserId) {
@@ -346,24 +495,41 @@ export async function createNotification(notification) {
     type: notification.type,
     from_user_id: notification.fromUserId,
     from_user_name: notification.fromUserName,
+    from_user_photo: notification.fromUserPhoto || notification.fromUserPhotoPath || null,
     post_id: notification.postId || null,
     friend_request_id: notification.friendRequestId || null,
     read: notification.read || false,
   };
 
-  const { data, error } = await supabase
-    .from('notifications')
-    .insert(payload)
-    .select('*')
-    .single();
-  if (error) throw error;
-  return normalizeNotification(data);
+  const { error } = await supabase.from('notifications').insert(payload);
+
+  if (error) {
+    const isMissingPhotoColumn =
+      error.code === 'PGRST204' ||
+      /from_user_photo/i.test(error.message || '') ||
+      /from_user_photo/i.test(error.details || '') ||
+      /from_user_photo/i.test(error.hint || '');
+
+    if (isMissingPhotoColumn && payload.from_user_photo !== null) {
+      const fallbackPayload = { ...payload };
+      delete fallbackPayload.from_user_photo;
+
+      const { error: fallbackError } = await supabase.from('notifications').insert(fallbackPayload);
+
+      if (fallbackError) throw fallbackError;
+      return null;
+    }
+
+    throw error;
+  }
+
+  return null;
 }
 
 export async function listNotifications(userId) {
   const { data, error } = await supabase
     .from('notifications')
-    .select('*')
+    .select('*, friend_request:friend_requests(status)')
     .eq('user_id', userId)
     .order('created_at', { ascending: false });
   if (error) throw error;
@@ -526,6 +692,10 @@ export async function sendFriendRequest(requesterId, receiverId) {
     return relation;
   }
 
+  if (relation.status === 'outgoing_pending') {
+    return relation;
+  }
+
   if (relation.status === 'incoming_pending') {
     throw new Error('This user already sent you a friend request. Accept it instead.');
   }
@@ -552,6 +722,7 @@ export async function sendFriendRequest(requesterId, receiverId) {
     type: 'friend_request',
     fromUserId: requesterId,
     fromUserName: requesterProfile?.name || requesterProfile?.email?.split('@')?.[0] || 'Someone',
+    fromUserPhoto: requesterProfile?.profilePhotoPath || requesterProfile?.profilePhoto || null,
     friendRequestId: request.id,
     read: false,
   }).catch((notificationError) => {
@@ -599,12 +770,22 @@ export async function acceptFriendRequest(requestId) {
 
   if (friendshipError) throw friendshipError;
 
+  const { error: markRequestReadError } = await supabase
+    .from('notifications')
+    .update({ read: true })
+    .eq('friend_request_id', acceptedRequest.id)
+    .eq('user_id', acceptedRequest.receiverId);
+  if (markRequestReadError) {
+    console.error('Error marking friend request notification read:', markRequestReadError);
+  }
+
   const receiverProfile = await getProfileById(acceptedRequest.receiverId).catch(() => null);
   await createNotification({
     userId: acceptedRequest.requesterId,
     type: 'friend_request_accepted',
     fromUserId: acceptedRequest.receiverId,
     fromUserName: receiverProfile?.name || receiverProfile?.email?.split('@')?.[0] || 'Someone',
+    fromUserPhoto: receiverProfile?.profilePhotoPath || receiverProfile?.profilePhoto || null,
     friendRequestId: acceptedRequest.id,
     read: false,
   }).catch((notificationError) => {
@@ -645,18 +826,15 @@ export async function rejectFriendRequest(requestId) {
   if (updateError) throw updateError;
 
   const rejectedRequest = normalizeFriendRequest(updatedRequestData);
-  const receiverProfile = await getProfileById(rejectedRequest.receiverId).catch(() => null);
 
-  await createNotification({
-    userId: rejectedRequest.requesterId,
-    type: 'friend_request_rejected',
-    fromUserId: rejectedRequest.receiverId,
-    fromUserName: receiverProfile?.name || receiverProfile?.email?.split('@')?.[0] || 'Someone',
-    friendRequestId: rejectedRequest.id,
-    read: false,
-  }).catch((notificationError) => {
-    console.error('Error creating friend request rejected notification:', notificationError);
-  });
+  const { error: markRejectedReadError } = await supabase
+    .from('notifications')
+    .update({ read: true })
+    .eq('friend_request_id', rejectedRequest.id)
+    .eq('user_id', rejectedRequest.receiverId);
+  if (markRejectedReadError) {
+    console.error('Error marking rejected friend request notification read:', markRejectedReadError);
+  }
 
   return rejectedRequest;
 }
@@ -682,6 +860,7 @@ export async function removeFriend(userId, friendId) {
     type: 'friend_removed',
     fromUserId: userId,
     fromUserName: currentUserProfile?.name || currentUserProfile?.email?.split('@')?.[0] || 'Someone',
+    fromUserPhoto: currentUserProfile?.profilePhotoPath || currentUserProfile?.profilePhoto || null,
     read: false,
   }).catch((notificationError) => {
     console.error('Error creating friend removed notification:', notificationError);
@@ -846,6 +1025,66 @@ export async function listDirectMessages(chatId) {
     .order('created_at', { ascending: false });
   if (error) throw error;
   return (data || []).map(normalizeMessage);
+}
+
+export async function listDirectChatSummaries(userId) {
+  if (!userId) return [];
+
+  const [friends, messagesResult, preferences] = await Promise.all([
+    listFriendProfiles(userId),
+    supabase
+      .from('direct_messages')
+      .select('*')
+      .or(`send_by.eq.${userId},send_to.eq.${userId}`)
+      .order('created_at', { ascending: false }),
+    listDirectChatPreferences(userId),
+  ]);
+
+  if (messagesResult.error) throw messagesResult.error;
+
+  const friendMap = new Map((friends || []).map((friend) => [friend.uid || friend.id, friend]));
+  const preferenceMap = new Map((preferences || []).map((pref) => [pref.otherUserId, pref]));
+  const threadMap = new Map();
+
+  (messagesResult.data || []).forEach((row) => {
+    const message = normalizeMessage(row);
+    if (!message) return;
+    const otherUserId = message.sendBy === userId ? message.sendTo : message.sendBy;
+    if (!otherUserId || threadMap.has(otherUserId)) return;
+
+    threadMap.set(otherUserId, message);
+  });
+
+  return Array.from(friendMap.values())
+    .map((friend) => {
+      const otherUserId = friend.uid || friend.id;
+      const latestMessage = threadMap.get(otherUserId) || null;
+      const preference = preferenceMap.get(otherUserId) || null;
+      const latestTimestamp = latestMessage?.createdAt?.toDate?.() || null;
+      const hiddenAt = preference?.hiddenAt?.toDate?.() || null;
+      const isHidden = hiddenAt && (!latestTimestamp || latestTimestamp.getTime() <= hiddenAt.getTime());
+
+      if (isHidden) return null;
+
+      return {
+        userId: otherUserId,
+        name: friend.name || 'User',
+        email: friend.email,
+        profilePhoto: friend.profilePhotoPath || friend.profilePhoto || null,
+        latestMessageText: latestMessage?.text || '',
+        latestMessageCreatedAt: latestMessage?.createdAt || null,
+        hasMessages: !!latestMessage,
+        mutedAt: preference?.mutedAt || null,
+        hiddenAt: preference?.hiddenAt || null,
+        chatId: [userId, otherUserId].sort().join('_'),
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => {
+      const leftTime = left.latestMessageCreatedAt?.toDate?.()?.getTime() || 0;
+      const rightTime = right.latestMessageCreatedAt?.toDate?.()?.getTime() || 0;
+      return rightTime - leftTime || String(left.name).localeCompare(String(right.name));
+    });
 }
 
 export async function sendDirectMessage(chatId, message) {

@@ -1,9 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { View, StyleSheet, FlatList, Image, Pressable, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { auth } from '../../services/supabase/auth';
-import { listFriendProfiles } from '../../services/supabase/data';
+import { listDirectChatSummaries } from '../../services/supabase/data';
 import { getFileUrl } from '../../src/storage/storageProvider';
 import ThemedView from '../ThemedView';
 import ThemedText from '../ThemedText';
@@ -15,39 +15,45 @@ export default function DirectMessages() {
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme] ?? Colors.light;
 
-  const [users, setUsers] = useState([]);
+  const [threads, setThreads] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    loadUsers();
-  }, []);
-
-  const loadUsers = async () => {
+  const loadThreads = useCallback(async () => {
     try {
       if (!auth.currentUser) {
+        setThreads([]);
         setLoading(false);
         return;
       }
 
-      const usersList = await listFriendProfiles(auth.currentUser.uid);
-
-      setUsers(usersList.map((user) => ({ userId: user.uid, ...user })));
+      const summaries = await listDirectChatSummaries(auth.currentUser.uid);
+      setThreads(summaries);
       setLoading(false);
     } catch (error) {
-      console.error('Error loading users:', error);
+      console.error('Error loading direct message threads:', error);
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    void loadThreads();
+
+    const interval = setInterval(() => {
+      void loadThreads();
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [loadThreads]);
 
   const handleUserPress = (user) => {
     router.push({
       pathname: '/chat/directMessage',
-        params: {
-          otherUserId: user.userId,
-          otherUserName: user.name,
-          otherUserPhoto: user.profilePhotoPath || user.profilePhoto || '',
-        }
-      });
+      params: {
+        otherUserId: String(user.userId),
+        otherUserName: user.name,
+        otherUserPhoto: user.profilePhoto || '',
+      },
+    });
   };
 
   if (loading) {
@@ -70,29 +76,41 @@ export default function DirectMessages() {
   return (
     <ThemedView style={styles.container}>
       <FlatList
-        data={users}
+        data={threads}
         keyExtractor={(item) => item.userId}
         renderItem={({ item }) => (
           <Pressable
             style={({ pressed }) => [
               styles.userItem,
               { backgroundColor: theme.uiBackground },
-              pressed && { opacity: 0.7 }
+              pressed && { opacity: 0.7 },
             ]}
             onPress={() => handleUserPress(item)}
           >
             <View style={[styles.avatar, { backgroundColor: theme.background }]}>
-              {(item.profilePhoto || item.profilePhotoPath) && (
-                <Image source={{ uri: getFileUrl(item.profilePhotoPath || item.profilePhoto) }} style={styles.avatarImage} />
-              )}
-              {!(item.profilePhoto || item.profilePhotoPath) && (
+              {(item.profilePhoto) ? (
+                <Image source={{ uri: getFileUrl(item.profilePhoto) }} style={styles.avatarImage} />
+              ) : (
                 <Ionicons name="person" size={24} color={theme.iconColor} />
               )}
             </View>
 
             <View style={styles.userInfo}>
-              <ThemedText style={styles.userName}>{item.name || 'User'}</ThemedText>
-              <ThemedText style={styles.userEmail}>{item.email}</ThemedText>
+              <View style={styles.nameRow}>
+                <ThemedText style={styles.userName} numberOfLines={1} ellipsizeMode="tail">
+                  {item.name || 'User'}
+                </ThemedText>
+                {item.mutedAt && (
+                  <Ionicons name="notifications-off-outline" size={14} color={theme.iconColor} />
+                )}
+              </View>
+              <ThemedText
+                style={[styles.latestMessage, !item.hasMessages && styles.placeholderText]}
+                numberOfLines={1}
+                ellipsizeMode="tail"
+              >
+                {item.latestMessageText || 'Start a conversation'}
+              </ThemedText>
             </View>
 
             <Ionicons name="chatbubble-outline" size={20} color={theme.iconColor} />
@@ -146,15 +164,29 @@ const styles = StyleSheet.create({
   },
   userInfo: {
     flex: 1,
+    minWidth: 0,
+    marginRight: 12,
+  },
+  nameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    minWidth: 0,
   },
   userName: {
+    flex: 1,
     fontSize: 16,
     fontWeight: '600',
     marginBottom: 2,
+    minWidth: 0,
   },
-  userEmail: {
+  latestMessage: {
     fontSize: 13,
-    opacity: 0.6,
+    opacity: 0.7,
+  },
+  placeholderText: {
+    opacity: 0.45,
+    fontStyle: 'italic',
   },
   emptyContainer: {
     alignItems: 'center',

@@ -1,10 +1,11 @@
 import React from 'react';
-import { Pressable, StyleSheet, View } from 'react-native';
+import { Image, Pressable, StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import ThemedText from '../ThemedText';
 import { useColorScheme } from 'react-native';
 import { Colors } from '../../constants/colors';
+import { getFileUrl } from '../../src/storage/storageProvider';
 
 export default function NotificationItem({ notification, onPress, onAcceptFriendRequest, onRejectFriendRequest }) {
   const router = useRouter();
@@ -21,7 +22,9 @@ export default function NotificationItem({ notification, onPress, onAcceptFriend
       case 'friend_request_rejected': return 'close-circle';
       case 'friend_removed': return 'person-remove';
       case 'share': return 'share';
-      case 'message': return 'mail';
+      case 'message':
+      case 'direct_message':
+        return 'mail';
       default: return 'notifications';
     }
   };
@@ -33,24 +36,35 @@ export default function NotificationItem({ notification, onPress, onAcceptFriend
       case 'comment': return `${name} commented on your post`;
       case 'follow': return `${name} started following you`;
       case 'friend_request': return `${name} sent you a friend request`;
-      case 'friend_request_accepted': return `${name} accepted your friend request`;
+      case 'friend_request_accepted': return `${name} accepted your friend request. You are now friends.`;
       case 'friend_request_rejected': return `${name} rejected your friend request`;
       case 'friend_removed': return `${name} removed you from friends`;
       case 'share': return `${name} shared your post`;
-      case 'message': return `${name} sent you a message`;
+      case 'message':
+      case 'direct_message':
+        return `${name} sent you a message`;
       default: return 'New notification';
     }
   };
 
   const handlePress = () => {
-    onPress();
-    
+    onPress?.();
+
     if (notification.postId) {
       // Navigate to post
       router.push(`/post/${notification.postId}`);
+    } else if (notification.type === 'direct_message' || notification.type === 'message') {
+      router.push({
+        pathname: '/chat/directMessage',
+        params: {
+          otherUserId: notification.fromUserId,
+          otherUserName: notification.fromUserName || 'User',
+          otherUserPhoto: notification.fromUserPhoto || '',
+        },
+      });
     } else if (notification.type === 'follow') {
       router.push(`/profile/${notification.fromUserId}`);
-    } else if (notification.type?.startsWith('friend_request') || notification.type === 'friend_removed') {
+    } else if (notification.type === 'friend_removed' || notification.type === 'friend_request_accepted' || notification.type === 'friend_request_rejected') {
       router.push(`/profile/${notification.fromUserId}`);
     }
   };
@@ -63,8 +77,12 @@ export default function NotificationItem({ notification, onPress, onAcceptFriend
       ]}
     >
       <Pressable style={styles.rowContent} onPress={handlePress}>
-        <View style={[styles.iconContainer, { backgroundColor: theme.background }]}>
-          <Ionicons name={getIcon()} size={24} color={theme.iconColorFocused} />
+        <View style={[styles.avatarContainer, { backgroundColor: theme.background }]}>
+          {notification.fromUserPhoto ? (
+            <Image source={{ uri: getFileUrl(notification.fromUserPhoto) }} style={styles.avatar} />
+          ) : (
+            <Ionicons name={getIcon()} size={24} color={theme.iconColorFocused} />
+          )}
         </View>
 
         <View style={styles.content}>
@@ -79,7 +97,7 @@ export default function NotificationItem({ notification, onPress, onAcceptFriend
         )}
       </Pressable>
 
-      {notification.type === 'friend_request' && (
+      {notification.type === 'friend_request' && notification.friendRequestStatus === 'pending' && (
         <View style={styles.actionRow}>
           <Pressable
             style={[styles.actionButton, styles.rejectButton]}
@@ -125,13 +143,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
   },
-  iconContainer: {
+  avatarContainer: {
     width: 48,
     height: 48,
     borderRadius: 24,
     justifyContent: 'center',
     alignItems: 'center',
     marginRight: 12,
+  },
+  avatar: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
   },
   content: {
     flex: 1,
