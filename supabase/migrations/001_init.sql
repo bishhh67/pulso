@@ -115,6 +115,7 @@ alter table public.notifications enable row level security;
 alter table public.groups enable row level security;
 alter table public.group_messages enable row level security;
 alter table public.direct_messages enable row level security;
+alter table public.direct_messages replica identity full;
 alter table public.notes enable row level security;
 
 create policy "Profiles are readable by everyone" on public.profiles for select using (true);
@@ -159,6 +160,8 @@ create policy "Direct messages are readable by participants" on public.direct_me
 using ((select auth.uid()) = send_by or (select auth.uid()) = send_to);
 create policy "Direct messages can be created by participants" on public.direct_messages for insert to authenticated
 with check ((select auth.uid()) = send_by);
+create policy "Direct messages can be deleted by sender" on public.direct_messages for delete to authenticated
+using ((select auth.uid()) = send_by);
 
 create policy "Notes are readable by everyone" on public.notes for select using (true);
 create policy "Authenticated users can create notes" on public.notes for insert to authenticated with check (true);

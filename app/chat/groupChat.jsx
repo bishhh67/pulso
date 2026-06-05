@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   View,
   StyleSheet,
@@ -11,80 +11,258 @@ import {
   ActivityIndicator,
   Modal,
   Alert,
+  Keyboard,
+  Dimensions
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { auth } from '../../services/supabase/auth';
-import { getGroupById, listGroupMessages, listProfilesExcept, sendGroupMessage, addGroupMember, removeGroupMember } from '../../services/supabase/data';
+import { supabase } from '../../services/supabase/client';
+import { listProfilesExcept, normalizeMessage } from '../../services/supabase/data';
+import {
+  joinServer,
+  createNotification,
+  getServerById,
+  listServerChannels,
+  createChannel,
+  updateChannel,
+  deleteChannel,
+  listChannelMessages,
+  sendChannelMessage,
+  deleteChannelMessage,
+  getServerMembers,
+  updateMemberRole,
+  transferServerOwnership,
+  leaveOrKickFromServer,
+  deleteServer,
+  getUserServerMember
+} from '../../services/supabase/server';
+import { getFileUrl } from '../../src/storage/storageProvider';
 import ThemedView from '../../components/ThemedView';
 import ThemedText from '../../components/ThemedText';
 import ThemedButton from '../../components/ThemedButton';
-import { getFileUrl } from '../../src/storage/storageProvider';
 import { useColorScheme } from 'react-native';
 import { Colors } from '../../constants/colors';
+
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 export default function GroupChat() {
   const router = useRouter();
   const params = useLocalSearchParams();
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme] ?? Colors.light;
+  const insets = useSafeAreaInsets();
 
-  const { groupId, groupName, groupImage } = params;
+  const { groupId: serverId, groupName: serverName, groupImage: serverImage } = params;
 
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState('');
   const [loading, setLoading] = useState(true);
-  const [groupData, setGroupData] = useState(null);
-  const [optionsVisible, setOptionsVisible] = useState(false);
-  const [addMemberVisible, setAddMemberVisible] = useState(false);
-  const [users, setUsers] = useState([]);
+  const [serverData, setServerData] = useState(null);
+  
+  // Channels
+  const [channels, setChannels] = useState([]);
+  const [activeChannel, setActiveChannel] = useState(null);
+  const activeChannelRef = useRef(null);
+
+  // Members and Roles
+  const [members, setMembers] = useState([]);
+  const [userRole, setUserRole] = useState('normal'); // 'admin', 'moderator', 'normal'
+  const [usersToInvite, setUsersToInvite] = useState([]);
+
+  // UI States
+  const [sidebarVisible, setSidebarVisible] = useState(false);
+  const [serverOptionsVisible, setServerOptionsVisible] = useState(false);
+  const [createChannelVisible, setCreateChannelVisible] = useState(false);
+  const [editChannelVisible, setEditChannelVisible] = useState(false);
+  const [channelToEdit, setChannelToEdit] = useState(null);
+  const [inviteModalVisible, setInviteModalVisible] = useState(false);
+  const [memberRoleModalVisible, setMemberRoleModalVisible] = useState(false);
+  const [selectedMember, setSelectedMember] = useState(null);
+  const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
+
+  // Input states for creation/editing
+  const [newChannelName, setNewChannelName] = useState('');
+  const [newChannelDescription, setNewChannelDescription] = useState('');
+  const [newChannelRoles, setNewChannelRoles] = useState({
+    admin: true,
+    moderator: true,
+    normal: true,
+  });
+
   const flatListRef = useRef();
 
+  // Sync ref
   useEffect(() => {
-    if (!auth.currentUser || !groupId) {
+    activeChannelRef.current = activeChannel;
+  }, [activeChannel]);
+
+  // Keyboard height adaptation
+  useEffect(() => {
+    const showSubscription = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      () => {
+        setIsKeyboardVisible(true);
+        setTimeout(() => {
+          flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+        }, 100);
+      }
+    );
+    const hideSubscription = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => setIsKeyboardVisible(false)
+    );
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, []);
+
+  const loadServerData = useCallback(async () => {
+    try {
+      const data = await getServerById(serverId);
+      setServerData(data);
+    } catch (error) {
+      console.error('Error loading server details:', error);
+    }
+  }, [serverId]);
+
+  const loadServerMembersAndRole = useCallback(async () => {
+    try {
+      const serverMembers = await getServerMembers(serverId);
+      setMembers(serverMembers);
+
+      const myMembership = serverMembers.find(m => m.userId === auth.currentUser?.uid);
+      if (myMembership) {
+        setUserRole(myMembership.role);
+      }
+    } catch (error) {
+      console.error('Error loading server members:', error);
+    }
+  }, [serverId]);
+
+  const loadChannels = useCallback(async () => {
+    try {
+      const allChannels = await listServerChannels(serverId);
+      // Retrieve member details to get their role for visibility filtering
+      const serverMembers = await getServerMembers(serverId);
+      const myRole = serverMembers.find(m => m.userId === auth.currentUser?.uid)?.role || 'normal';
+      
+      // Filter channels to only show those accessible to the current user's role
+      const visible = allChannels.filter(c => c.allowedRoles.includes(myRole));
+      setChannels(visible);
+
+      // Default active channel to general
+      if (visible.length > 0) {
+        if (!activeChannelRef.current || !visible.find(vc => vc.id === activeChannelRef.current.id)) {
+          setActiveChannel(visible.find(c => c.name === 'general') || visible[0]);
+        }
+      }
+    } catch (error) {
+      console.error('Error loading channels:', error);
+    }
+  }, [serverId]);
+
+  const loadMessages = useCallback(async () => {
+    if (!activeChannel) return;
+    try {
+      const list = await listChannelMessages(activeChannel.id);
+      setMessages(list);
+    } catch (error) {
+      console.error('Error loading channel messages:', error);
+    } finally {
+      setLoading(false);
+    }
+  }, [activeChannel]);
+
+  const loadAllProfilesForInvite = useCallback(async () => {
+    try {
+      const profiles = await listProfilesExcept(auth.currentUser?.email);
+      // Filter out users already in the server
+      const currentMemberIds = new Set(members.map(m => m.userId));
+      const notInServer = profiles
+        .map(p => ({ userId: p.uid, ...p }))
+        .filter(p => !currentMemberIds.has(p.userId));
+      setUsersToInvite(notInServer);
+    } catch (error) {
+      console.error('Error loading profiles for invitation:', error);
+    }
+  }, [members]);
+
+  // Initial and dynamic loads
+  useEffect(() => {
+    if (!auth.currentUser || !serverId) {
       setLoading(false);
       return;
     }
 
-    loadGroupData();
-    loadUsers();
+    setLoading(true);
+    loadServerData();
+    loadServerMembersAndRole();
+    loadChannels();
+  }, [serverId, loadServerData, loadServerMembersAndRole, loadChannels]);
 
-    const loadMessages = async () => {
-      const messagesList = await listGroupMessages(groupId);
-      setMessages(messagesList);
-      setLoading(false);
+  // Load messages when channel switches
+  useEffect(() => {
+    if (activeChannel) {
+      setLoading(true);
+      loadMessages();
+    }
+  }, [activeChannel, loadMessages]);
+
+  // Real-time subscription setup
+  useEffect(() => {
+    if (!serverId) return;
+
+    const serverChannel = supabase.channel(`server-sync-${serverId}`);
+
+    serverChannel
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'channels', filter: `server_id=eq.${serverId}` },
+        () => {
+          loadChannels();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'server_members', filter: `server_id=eq.${serverId}` },
+        () => {
+          loadServerMembersAndRole();
+          loadChannels(); // channels view depends on roles
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'server_messages', filter: `server_id=eq.${serverId}` },
+        (payload) => {
+          if (payload.eventType === 'INSERT' && payload.new) {
+            if (payload.new.channel_id === activeChannelRef.current?.id) {
+              const msg = normalizeMessage(payload.new);
+              setMessages((prev) => [msg, ...prev.filter(m => m.id !== msg.id)]);
+            }
+          } else if (payload.eventType === 'DELETE' && payload.old?.id) {
+            setMessages((prev) => prev.filter(m => m.id !== payload.old.id));
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(serverChannel);
     };
+  }, [serverId, loadChannels, loadServerMembersAndRole]);
 
-    loadMessages();
-    const interval = setInterval(loadMessages, 3000);
-    return () => clearInterval(interval);
-  }, [groupId]);
-
-  const loadGroupData = async () => {
-    try {
-      setGroupData(await getGroupById(groupId));
-    } catch (error) {
-      console.error('Error loading group:', error);
-    }
-  };
-
-  const loadUsers = async () => {
-    try {
-      const usersList = await listProfilesExcept(auth.currentUser?.email);
-      setUsers(usersList.map((user) => ({ userId: user.uid, ...user })));
-    } catch (error) {
-      console.error('Error loading users:', error);
-    }
-  };
-
-  const sendMessage = async () => {
-    if (!text.trim() || !auth.currentUser) return;
+  const handleSendMessage = async () => {
+    if (!text.trim() || !auth.currentUser || !activeChannel) return;
 
     const messageText = text.trim();
     setText('');
 
     try {
-      await sendGroupMessage(groupId, {
+      await sendChannelMessage(activeChannel.id, serverId, {
         text: messageText,
         sendBy: auth.currentUser.uid,
         senderName: auth.currentUser.name || 'User',
@@ -100,34 +278,94 @@ export default function GroupChat() {
     }
   };
 
-  const addMember = async (userId) => {
+  const handleCreateChannel = async () => {
+    if (!newChannelName.trim()) {
+      Alert.alert('Error', 'Please enter a channel name');
+      return;
+    }
+
+    const allowedRoles = [];
+    if (newChannelRoles.admin) allowedRoles.push('admin');
+    if (newChannelRoles.moderator) allowedRoles.push('moderator');
+    if (newChannelRoles.normal) allowedRoles.push('normal');
+
+    if (allowedRoles.length === 0) {
+      Alert.alert('Error', 'At least one role must be allowed to view the channel');
+      return;
+    }
+
     try {
-      await addGroupMember(groupId, userId);
-      
-      Alert.alert('Success', 'Member added to group');
-      setAddMemberVisible(false);
-      loadGroupData();
+      await createChannel({
+        serverId,
+        name: newChannelName.trim(),
+        description: newChannelDescription.trim(),
+        allowedRoles,
+      });
+
+      Alert.alert('Success', 'Channel created!');
+      setCreateChannelVisible(false);
+      setNewChannelName('');
+      setNewChannelDescription('');
+      setNewChannelRoles({ admin: true, moderator: true, normal: true });
+      loadChannels();
     } catch (error) {
-      console.error('Error adding member:', error);
-      Alert.alert('Error', 'Failed to add member');
+      console.error('Error creating channel:', error);
+      Alert.alert('Error', 'Failed to create channel');
     }
   };
 
-  const leaveGroup = async () => {
+  const handleEditChannel = async () => {
+    if (!newChannelName.trim()) {
+      Alert.alert('Error', 'Please enter a channel name');
+      return;
+    }
+
+    const allowedRoles = [];
+    if (newChannelRoles.admin) allowedRoles.push('admin');
+    if (newChannelRoles.moderator) allowedRoles.push('moderator');
+    if (newChannelRoles.normal) allowedRoles.push('normal');
+
+    try {
+      await updateChannel(channelToEdit.id, {
+        name: newChannelName.trim(),
+        description: newChannelDescription.trim(),
+        allowedRoles,
+      });
+
+      Alert.alert('Success', 'Channel updated!');
+      setEditChannelVisible(false);
+      setChannelToEdit(null);
+      setNewChannelName('');
+      setNewChannelDescription('');
+      loadChannels();
+    } catch (error) {
+      console.error('Error updating channel:', error);
+      Alert.alert('Error', 'Failed to update channel');
+    }
+  };
+
+  const handleDeleteChannel = (channel) => {
+    if (channel.name === 'general') {
+      Alert.alert('Error', 'The #general channel cannot be deleted.');
+      return;
+    }
+
     Alert.alert(
-      'Leave Group',
-      'Are you sure you want to leave this group?',
+      'Delete Channel',
+      `Are you sure you want to delete #${channel.name}? This will permanently remove all messages inside it.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Leave',
+          text: 'Delete',
           style: 'destructive',
           onPress: async () => {
             try {
-              await removeGroupMember(groupId, auth.currentUser.uid);
-              router.back();
+              await deleteChannel(channel.id);
+              Alert.alert('Success', 'Channel deleted.');
+              loadChannels();
             } catch (error) {
-              Alert.alert('Error', 'Failed to leave group');
+              console.error('Error deleting channel:', error);
+              Alert.alert('Error', 'Failed to delete channel');
             }
           }
         }
@@ -135,76 +373,261 @@ export default function GroupChat() {
     );
   };
 
+  const handleInviteUser = async (userId) => {
+    try {
+      // Create a server invite notification for the target user
+      await createNotification({
+        userId,
+        type: 'server_invite',
+        fromUserId: auth.currentUser?.uid,
+        fromUserName: auth.currentUser?.email?.split('@')[0] ?? 'User',
+        serverId,
+        serverName: serverData?.name,
+        read: false,
+      });
+      Alert.alert('Success', 'Invitation sent!');
+      loadAllProfilesForInvite();
+    } catch (error) {
+      console.error('Error sending server invite:', error);
+      Alert.alert('Error', 'Failed to send invite');
+    }
+  };
+
+  const handleKickMember = (userId, name) => {
+    if (userId === serverData?.ownerId) {
+      Alert.alert('Error', 'You cannot kick the server owner.');
+      return;
+    }
+
+    Alert.alert(
+      'Kick Member',
+      `Are you sure you want to kick ${name} from the server?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Kick',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await leaveOrKickFromServer(serverId, userId);
+              Alert.alert('Success', `${name} kicked.`);
+              loadServerMembersAndRole();
+              setMemberRoleModalVisible(false);
+            } catch (error) {
+              console.error('Error kicking user:', error);
+              Alert.alert('Error', 'Failed to kick user.');
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const handleUpdateRole = async (targetRole) => {
+    if (!selectedMember) return;
+    try {
+      await updateMemberRole(serverId, selectedMember.userId, targetRole);
+      Alert.alert('Success', 'Member role updated!');
+      loadServerMembersAndRole();
+      setMemberRoleModalVisible(false);
+    } catch (error) {
+      console.error('Error updating user role:', error);
+      Alert.alert('Error', 'Failed to update member role');
+    }
+  };
+
+  const handleTransferOwnership = () => {
+    if (!selectedMember) return;
+
+    Alert.alert(
+      'Transfer Ownership',
+      `Are you sure you want to transfer ownership to ${selectedMember.name}? You will lose administrative ownership privileges.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Transfer',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await transferServerOwnership(serverId, auth.currentUser.uid, selectedMember.userId);
+              Alert.alert('Success', `Ownership transferred to ${selectedMember.name}`);
+              loadServerData();
+              loadServerMembersAndRole();
+              setMemberRoleModalVisible(false);
+            } catch (error) {
+              console.error('Error transferring server ownership:', error);
+              Alert.alert('Error', 'Failed to transfer ownership');
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const handleLeaveServer = () => {
+    if (auth.currentUser.uid === serverData?.ownerId) {
+      Alert.alert('Error', 'As the Owner, you cannot leave. Transfer ownership to another user first.');
+      return;
+    }
+
+    Alert.alert(
+      'Leave Server',
+      'Are you sure you want to leave this server?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Leave',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await leaveOrKickFromServer(serverId, auth.currentUser.uid);
+              router.back();
+            } catch (error) {
+              console.error('Error leaving server:', error);
+              Alert.alert('Error', 'Failed to leave server');
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const handleDeleteServer = () => {
+    Alert.alert(
+      'Delete Server',
+      `Are you sure you want to delete "${serverData?.name || 'this server'}"? This is permanent and deletes all channels and messages.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete Permanently',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteServer(serverId);
+              Alert.alert('Success', 'Server deleted.');
+              router.back();
+            } catch (error) {
+              console.error('Error deleting server:', error);
+              Alert.alert('Error', 'Failed to delete server');
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const handleMessageDelete = (messageId, sendBy) => {
+    const isOwner = userRole === 'admin';
+    const isMod = userRole === 'moderator';
+    const isOwnMessage = sendBy === auth.currentUser?.uid;
+
+    if (!isOwnMessage && !isOwner && !isMod) return;
+
+    Alert.alert(
+      'Delete Message',
+      'Delete this message?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteChannelMessage(messageId);
+            } catch (error) {
+              console.error('Error deleting message:', error);
+              Alert.alert('Error', 'Failed to delete message');
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const toggleSidebar = () => setSidebarVisible(!sidebarVisible);
+
   const formatTime = (timestamp) => {
     if (!timestamp?.toDate) return '';
-    
     const date = timestamp.toDate();
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
-  const isAdmin = groupData?.admins?.includes(auth.currentUser?.uid);
-
   const renderMessage = ({ item }) => {
     const isMe = item.sendBy === auth.currentUser?.uid;
-
-    // Check if it's a shared post
-    if (item.type === 'shared_post' && item.sharedPost) {
-      return (
-        <View style={[styles.sharedPostContainer, isMe ? { alignSelf: 'flex-end' } : { alignSelf: 'flex-start' }]}>
-          <View style={[styles.messageBubble, isMe ? styles.myMessage : styles.otherMessage]}>
-            {!isMe && (
-              <ThemedText style={styles.senderName}>{item.senderName}</ThemedText>
-            )}
-            <ThemedText style={{ color: isMe ? '#fff' : theme.text, marginBottom: 8 }}>
-              Shared a post
-            </ThemedText>
-            
-            {/* Shared Post Preview */}
-            <View style={[styles.sharedPost, { backgroundColor: theme.background }]}>
-              {(item.sharedPost.imagePath || item.sharedPost.image) && (
-                <Image source={{ uri: getFileUrl(item.sharedPost.imagePath || item.sharedPost.image) }} style={styles.sharedPostImage} />
-              )}
-              <ThemedText style={styles.sharedPostContent} numberOfLines={3}>
-                {item.sharedPost.content}
-              </ThemedText>
-              <ThemedText style={styles.sharedPostAuthor}>
-                By {item.sharedPost.authorName}
-              </ThemedText>
-            </View>
-
-            {item.createdAt && (
-              <ThemedText style={[styles.timeText, { color: isMe ? '#ddd' : theme.iconColor }]}>
-                {formatTime(item.createdAt)}
-              </ThemedText>
-            )}
-          </View>
-        </View>
-      );
-    }
+    const canDelete = isMe || userRole === 'admin' || userRole === 'moderator';
 
     return (
-      <View
-        style={[
-          styles.messageBubble,
-          isMe ? styles.myMessage : styles.otherMessage,
+      <Pressable
+        onLongPress={() => canDelete && handleMessageDelete(item.id, item.sendBy)}
+        style={({ pressed }) => [
+          styles.messagePressable,
+          pressed && canDelete && styles.messagePressed
         ]}
       >
-        {!isMe && (
-          <ThemedText style={styles.senderName}>{item.senderName}</ThemedText>
-        )}
-        <ThemedText style={{ color: isMe ? '#fff' : theme.text }}>
-          {item.text}
-        </ThemedText>
-        {item.createdAt && (
-          <ThemedText style={[styles.timeText, { color: isMe ? '#ddd' : theme.iconColor }]}>
-            {formatTime(item.createdAt)}
+        <View style={[styles.messageBubble, isMe ? styles.myMessage : styles.otherMessage, isMe ? { alignSelf: 'flex-end' } : { alignSelf: 'flex-start' }]}>
+          {!isMe && (
+            <ThemedText style={styles.senderName}>{item.senderName}</ThemedText>
+          )}
+          <ThemedText style={{ color: isMe ? '#fff' : theme.text }}>
+            {item.text}
           </ThemedText>
+          {item.createdAt && (
+            <ThemedText style={[styles.timeText, { color: isMe ? '#ddd' : theme.iconColor }]}>
+              {formatTime(item.createdAt)}
+            </ThemedText>
+          )}
+        </View>
+      </Pressable>
+    );
+  };
+
+  const renderChannelItem = ({ item }) => {
+    const isActive = activeChannel?.id === item.id;
+    const isStaff = userRole === 'admin' || userRole === 'moderator';
+
+    return (
+      <View style={[styles.channelItemWrapper, isActive && { backgroundColor: theme.uiBackground }]}>
+        <Pressable
+          style={styles.channelButton}
+          onPress={() => {
+            setActiveChannel(item);
+            setSidebarVisible(false);
+          }}
+        >
+          <Ionicons name="chatbubble-outline" size={18} color={isActive ? '#007AFF' : theme.iconColor} />
+          <ThemedText style={[styles.channelText, isActive && { color: '#007AFF', fontWeight: 'bold' }]} numberOfLines={1}>
+            {item.name}
+          </ThemedText>
+        </Pressable>
+
+        {isStaff && item.name !== 'general' && (
+          <View style={styles.channelActions}>
+            <Pressable
+              onPress={() => {
+                setChannelToEdit(item);
+                setNewChannelName(item.name);
+                setNewChannelDescription(item.description);
+                setNewChannelRoles({
+                  admin: item.allowedRoles.includes('admin'),
+                  moderator: item.allowedRoles.includes('moderator'),
+                  normal: item.allowedRoles.includes('normal'),
+                });
+                setEditChannelVisible(true);
+              }}
+              style={styles.channelIconBtn}
+            >
+              <Ionicons name="create-outline" size={16} color={theme.iconColor} />
+            </Pressable>
+            <Pressable onPress={() => handleDeleteChannel(item)} style={styles.channelIconBtn}>
+              <Ionicons name="trash-outline" size={16} color="#FF3B30" />
+            </Pressable>
+          </View>
         )}
       </View>
     );
   };
 
-  if (loading) {
+  if (loading && !activeChannel) {
     return (
       <ThemedView style={styles.centerContainer}>
         <ActivityIndicator size="large" color={theme.iconColorFocused} />
@@ -216,62 +639,61 @@ export default function GroupChat() {
     <KeyboardAvoidingView
       style={{ flex: 1 }}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={100}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top + 60 : 0}
     >
       <ThemedView style={styles.container}>
         {/* Header */}
-        <View style={[styles.header, { backgroundColor: theme.uiBackground }]}>
-          <ThemedButton onPress={() => router.back()} style={styles.backButton}>
-            <Ionicons name="arrow-back" size={24} color={theme.iconColor} />
-          </ThemedButton>
+        <View style={[styles.header, { backgroundColor: theme.uiBackground, paddingTop: Math.max(insets.top, 12), borderBottomColor: theme.iconColor }]}>
+          <Pressable onPress={toggleSidebar} style={styles.menuButton} hitSlop={10}>
+            <Ionicons name="menu-outline" size={26} color={theme.iconColor} />
+          </Pressable>
 
-          <View style={[styles.avatar, { backgroundColor: theme.background }]}>
-            {groupImage ? (
-              <Image source={{ uri: getFileUrl(groupImage) }} style={styles.avatarImage} />
-            ) : (
-              <Ionicons name="people" size={20} color={theme.iconColor} />
+          <View style={styles.headerTitleWrap}>
+            <ThemedText title style={styles.headerTitle} numberOfLines={1}>
+              {serverData?.name || 'Server'}
+            </ThemedText>
+            {activeChannel && (
+              <ThemedText style={styles.channelSubHeader}>
+                #{activeChannel.name}
+              </ThemedText>
             )}
           </View>
 
-          <ThemedText title style={styles.headerTitle}>
-            {groupName || 'Group'}
-          </ThemedText>
-
-          <ThemedButton onPress={() => setOptionsVisible(true)} style={styles.optionsButton}>
-            <Ionicons name="ellipsis-vertical" size={20} color={theme.iconColor} />
-          </ThemedButton>
+          <Pressable onPress={() => setServerOptionsVisible(true)} style={styles.optionsButton} hitSlop={10}>
+            <Ionicons name="people-outline" size={24} color={theme.iconColor} />
+          </Pressable>
         </View>
 
-        {/* Messages */}
+        {/* Messaging Area */}
         <FlatList
           ref={flatListRef}
           data={messages}
           inverted
           keyExtractor={(item) => item.id}
           renderItem={renderMessage}
-          contentContainerStyle={styles.messagesList}
+          contentContainerStyle={[styles.messagesList, { paddingBottom: 12 }]}
           ListEmptyComponent={() => (
             <View style={styles.emptyContainer}>
               <Ionicons name="chatbubbles-outline" size={48} color={theme.iconColor} style={{ opacity: 0.3 }} />
-              <ThemedText style={styles.emptyText}>No messages yet</ThemedText>
-              <ThemedText style={styles.emptySubtext}>Start the conversation!</ThemedText>
+              <ThemedText style={styles.emptyText}>No messages in #{activeChannel?.name || 'channel'}</ThemedText>
+              <ThemedText style={styles.emptySubtext}>Be the first to start the discussion!</ThemedText>
             </View>
           )}
         />
 
-        {/* Input */}
-        <View style={[styles.inputContainer, { backgroundColor: theme.background, borderTopColor: theme.iconColor }]}>
+        {/* Message Input container */}
+        <View style={[styles.inputContainer, { backgroundColor: theme.background, borderTopColor: theme.iconColor, paddingBottom: isKeyboardVisible ? 8 : Math.max(insets.bottom, 8) }]}>
           <TextInput
             value={text}
             onChangeText={setText}
-            placeholder="Type a message..."
+            placeholder={`Message #${activeChannel?.name || ''}`}
             placeholderTextColor={theme.iconColor}
             style={[styles.input, { backgroundColor: theme.uiBackground, color: theme.text }]}
             multiline
             maxLength={2000}
           />
           <Pressable
-            onPress={sendMessage}
+            onPress={handleSendMessage}
             disabled={!text.trim()}
             style={[
               styles.sendButton,
@@ -286,83 +708,427 @@ export default function GroupChat() {
           </Pressable>
         </View>
 
-        {/* Options Modal */}
+        {/* Drawer Sidebar for Channels */}
         <Modal
-          visible={optionsVisible}
+          visible={sidebarVisible}
           transparent={true}
-          animationType="slide"
-          onRequestClose={() => setOptionsVisible(false)}
+          animationType="fade"
+          onRequestClose={toggleSidebar}
         >
-          <Pressable style={styles.modalOverlay} onPress={() => setOptionsVisible(false)}>
-            <Pressable style={[styles.optionsModal, { backgroundColor: theme.background }]}>
-              <ThemedText title style={styles.modalTitle}>Group Options</ThemedText>
+          <View style={styles.drawerOverlay}>
+            <Pressable style={styles.drawerDismiss} onPress={toggleSidebar} />
+            <View style={[styles.drawerContent, { backgroundColor: theme.background, paddingTop: Math.max(insets.top, 20) }]}>
+              {/* Server Name header */}
+              <View style={styles.drawerHeader}>
+                <View style={[styles.avatarMini, { backgroundColor: theme.uiBackground }]}>
+                  {serverData?.image ? (
+                    <Image source={{ uri: getFileUrl(serverData.image) }} style={styles.avatarMiniImg} />
+                  ) : (
+                    <Ionicons name="people" size={18} color={theme.iconColor} />
+                  )}
+                </View>
+                <ThemedText title style={styles.drawerServerName} numberOfLines={1}>
+                  {serverData?.name}
+                </ThemedText>
+              </View>
 
-              <ThemedButton
-                style={styles.optionButton}
-                onPress={() => {
-                  setOptionsVisible(false);
-                  // Navigate to group info screen
-                }}
-              >
-                <Ionicons name="information-circle-outline" size={24} color={theme.iconColor} />
-                <ThemedText style={styles.optionText}>Group Info</ThemedText>
-              </ThemedButton>
+              <View style={styles.drawerDivider} />
 
-              {isAdmin && (
-                <ThemedButton
-                  style={styles.optionButton}
-                  onPress={() => {
-                    setOptionsVisible(false);
-                    setAddMemberVisible(true);
-                  }}
-                >
-                  <Ionicons name="person-add-outline" size={24} color={theme.iconColor} />
-                  <ThemedText style={styles.optionText}>Add Members</ThemedText>
-                </ThemedButton>
-              )}
+              <View style={styles.channelsHeaderContainer}>
+                <ThemedText style={styles.channelsSectionTitle}>TEXT CHANNELS</ThemedText>
+                {(userRole === 'admin' || userRole === 'moderator') && (
+                  <Pressable
+                    onPress={() => {
+                      setCreateChannelVisible(true);
+                      setSidebarVisible(false);
+                    }}
+                    hitSlop={8}
+                  >
+                    <Ionicons name="add" size={20} color={theme.iconColor} />
+                  </Pressable>
+                )}
+              </View>
 
-              <ThemedButton
-                style={styles.optionButton}
-                onPress={() => {
-                  setOptionsVisible(false);
-                  leaveGroup();
-                }}
-              >
-                <Ionicons name="exit-outline" size={24} color="#FF3B30" />
-                <ThemedText style={[styles.optionText, { color: '#FF3B30' }]}>Leave Group</ThemedText>
-              </ThemedButton>
-            </Pressable>
-          </Pressable>
+              <FlatList
+                data={channels}
+                keyExtractor={(item) => item.id}
+                renderItem={renderChannelItem}
+                contentContainerStyle={styles.drawerChannelsList}
+              />
+            </View>
+          </View>
         </Modal>
 
-        {/* Add Member Modal */}
+        {/* Server Members / Options Modal */}
         <Modal
-          visible={addMemberVisible}
+          visible={serverOptionsVisible}
           transparent={true}
           animationType="slide"
-          onRequestClose={() => setAddMemberVisible(false)}
+          onRequestClose={() => setServerOptionsVisible(false)}
         >
           <View style={styles.modalOverlay}>
-            <View style={[styles.addMemberModal, { backgroundColor: theme.background }]}>
-              <ThemedText title style={styles.modalTitle}>Add Members</ThemedText>
-              
-              <FlatList
-                data={users.filter(u => !groupData?.members?.includes(u.userId))}
-                keyExtractor={(item) => item.userId}
-                renderItem={({ item }) => (
+            <Pressable style={styles.dismissArea} onPress={() => setServerOptionsVisible(false)} />
+            <View style={[styles.optionsModalContent, { backgroundColor: theme.background, paddingBottom: Math.max(insets.bottom, 20) }]}>
+              <ThemedText title style={styles.modalTitle}>Server Options</ThemedText>
+
+              {/* Server Details */}
+              <View style={styles.serverDetailsSummary}>
+                <ThemedText style={styles.serverDescText}>{serverData?.description || 'No server description.'}</ThemedText>
+              </View>
+
+              {/* Action Buttons */}
+              <View style={styles.serverActionsGrid}>
+                <ThemedButton
+                  style={[styles.actionBtnItem, { backgroundColor: theme.uiBackground }]}
+                  onPress={() => {
+                    setServerOptionsVisible(false);
+                    loadAllProfilesForInvite();
+                    setInviteModalVisible(true);
+                  }}
+                >
+                  <Ionicons name="person-add-outline" size={20} color="#007AFF" />
+                  <ThemedText style={styles.actionBtnText}>Invite User</ThemedText>
+                </ThemedButton>
+
+                {auth.currentUser.uid === serverData?.ownerId ? (
                   <ThemedButton
-                    style={[styles.userItem, { backgroundColor: theme.uiBackground }]}
-                    onPress={() => addMember(item.userId)}
+                    style={[styles.actionBtnItem, { backgroundColor: theme.uiBackground }]}
+                    onPress={() => {
+                      setServerOptionsVisible(false);
+                      handleDeleteServer();
+                    }}
                   >
-                    <ThemedText>{item.name}</ThemedText>
-                    <Ionicons name="add-circle-outline" size={24} color="#007AFF" />
+                    <Ionicons name="trash-outline" size={20} color="#FF3B30" />
+                    <ThemedText style={[styles.actionBtnText, { color: '#FF3B30' }]}>Delete Server</ThemedText>
+                  </ThemedButton>
+                ) : (
+                  <ThemedButton
+                    style={[styles.actionBtnItem, { backgroundColor: theme.uiBackground }]}
+                    onPress={() => {
+                      setServerOptionsVisible(false);
+                      handleLeaveServer();
+                    }}
+                  >
+                    <Ionicons name="exit-outline" size={20} color="#FF3B30" />
+                    <ThemedText style={[styles.actionBtnText, { color: '#FF3B30' }]}>Leave Server</ThemedText>
                   </ThemedButton>
                 )}
+              </View>
+
+              <ThemedText style={styles.memberListTitle}>MEMBERS ({members.length})</ThemedText>
+
+              {/* Members List */}
+              <FlatList
+                data={members}
+                keyExtractor={(item) => item.userId}
+                renderItem={({ item }) => {
+                  const isOwner = item.userId === serverData?.ownerId;
+                  const isMe = item.userId === auth.currentUser.uid;
+                  const canManage = userRole === 'admin' && !isMe;
+
+                  return (
+                    <Pressable
+                      onPress={() => {
+                        if (canManage) {
+                          setSelectedMember(item);
+                          setServerOptionsVisible(false);
+                          setMemberRoleModalVisible(true);
+                        }
+                      }}
+                      style={[styles.memberItem, { backgroundColor: theme.uiBackground }]}
+                    >
+                      <View style={[styles.avatarMini, { backgroundColor: theme.background }]}>
+                        {item.profilePhotoPath ? (
+                          <Image source={{ uri: getFileUrl(item.profilePhotoPath) }} style={styles.avatarMiniImg} />
+                        ) : (
+                          <Ionicons name="person" size={14} color={theme.iconColor} />
+                        )}
+                      </View>
+                      <View style={styles.memberInfo}>
+                        <ThemedText style={styles.memberName}>{item.name} {isMe && '(You)'}</ThemedText>
+                        <ThemedText style={styles.memberEmail}>{item.email}</ThemedText>
+                      </View>
+                      <View style={[
+                        styles.roleBadge,
+                        isOwner ? styles.roleBadgeOwner : item.role === 'moderator' ? styles.roleBadgeMod : styles.roleBadgeNormal
+                      ]}>
+                        <ThemedText style={styles.roleBadgeText}>
+                          {isOwner ? 'Owner' : item.role === 'moderator' ? 'Mod' : 'Member'}
+                        </ThemedText>
+                      </View>
+                    </Pressable>
+                  );
+                }}
+                style={styles.membersListScroll}
               />
 
               <ThemedButton
                 style={[styles.closeButton, { backgroundColor: theme.uiBackground }]}
-                onPress={() => setAddMemberVisible(false)}
+                onPress={() => setServerOptionsVisible(false)}
+              >
+                <ThemedText>Close</ThemedText>
+              </ThemedButton>
+            </View>
+          </View>
+        </Modal>
+
+        {/* Member Role / Promotion Modal */}
+        <Modal
+          visible={memberRoleModalVisible}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={() => setMemberRoleModalVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContent, { backgroundColor: theme.background }]}>
+              <ThemedText title style={styles.modalTitle}>Manage {selectedMember?.name}</ThemedText>
+
+              <ThemedButton
+                style={styles.roleOptionRow}
+                onPress={() => handleUpdateRole('moderator')}
+              >
+                <Ionicons name="shield-checkmark-outline" size={22} color="#007AFF" />
+                <ThemedText>Promote to Moderator</ThemedText>
+              </ThemedButton>
+
+              <ThemedButton
+                style={styles.roleOptionRow}
+                onPress={() => handleUpdateRole('normal')}
+              >
+                <Ionicons name="person-outline" size={22} color={theme.iconColor} />
+                <ThemedText>Demote to Normal User</ThemedText>
+              </ThemedButton>
+
+              <ThemedButton
+                style={styles.roleOptionRow}
+                onPress={handleTransferOwnership}
+              >
+                <Ionicons name="swap-horizontal-outline" size={22} color="#4CD964" />
+                <ThemedText>Transfer Server Ownership</ThemedText>
+              </ThemedButton>
+
+              <ThemedButton
+                style={styles.roleOptionRow}
+                onPress={() => handleKickMember(selectedMember?.userId, selectedMember?.name)}
+              >
+                <Ionicons name="ban" size={22} color="#FF3B30" />
+                <ThemedText style={{ color: '#FF3B30' }}>Kick from Server</ThemedText>
+              </ThemedButton>
+
+              <ThemedButton
+                style={[styles.closeButton, { backgroundColor: theme.uiBackground, marginTop: 12 }]}
+                onPress={() => setMemberRoleModalVisible(false)}
+              >
+                <ThemedText>Cancel</ThemedText>
+              </ThemedButton>
+            </View>
+          </View>
+        </Modal>
+
+        {/* Create Channel Modal */}
+        <Modal
+          visible={createChannelVisible}
+          transparent={true}
+          animationType="slide"
+          onRequestClose={() => setCreateChannelVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContent, { backgroundColor: theme.background }]}>
+              <ThemedText title style={styles.modalTitle}>Create Channel</ThemedText>
+
+              <TextInput
+                style={[styles.input, { backgroundColor: theme.uiBackground, color: theme.text, borderColor: theme.iconColor }]}
+                placeholder="Channel Name (e.g. study-group)"
+                placeholderTextColor={theme.iconColor}
+                value={newChannelName}
+                onChangeText={setNewChannelName}
+                maxLength={40}
+              />
+
+              <TextInput
+                style={[styles.input, { backgroundColor: theme.uiBackground, color: theme.text, borderColor: theme.iconColor }]}
+                placeholder="Description"
+                placeholderTextColor={theme.iconColor}
+                value={newChannelDescription}
+                onChangeText={setNewChannelDescription}
+                maxLength={100}
+              />
+
+              <ThemedText style={styles.rolesHeading}>VISIBLE TO ROLES</ThemedText>
+              
+              <Pressable
+                onPress={() => setNewChannelRoles(r => ({ ...r, normal: !r.normal }))}
+                style={styles.checkboxRow}
+              >
+                <Ionicons
+                  name={newChannelRoles.normal ? "checkbox" : "square-outline"}
+                  size={22}
+                  color={newChannelRoles.normal ? "#007AFF" : theme.iconColor}
+                />
+                <ThemedText style={styles.checkboxText}>Normal Members</ThemedText>
+              </Pressable>
+
+              <Pressable
+                onPress={() => setNewChannelRoles(r => ({ ...r, moderator: !r.moderator }))}
+                style={styles.checkboxRow}
+              >
+                <Ionicons
+                  name={newChannelRoles.moderator ? "checkbox" : "square-outline"}
+                  size={22}
+                  color={newChannelRoles.moderator ? "#007AFF" : theme.iconColor}
+                />
+                <ThemedText style={styles.checkboxText}>Moderators</ThemedText>
+              </Pressable>
+
+              <View style={styles.checkboxRow}>
+                <Ionicons name="checkbox" size={22} color="#007AFF" style={{ opacity: 0.5 }} />
+                <ThemedText style={[styles.checkboxText, { opacity: 0.5 }]}>Admins (Always Allowed)</ThemedText>
+              </View>
+
+              <View style={styles.modalButtons}>
+                <ThemedButton
+                  style={[styles.modalButton, { backgroundColor: theme.uiBackground }]}
+                  onPress={() => {
+                    setCreateChannelVisible(false);
+                    setNewChannelName('');
+                    setNewChannelDescription('');
+                    setNewChannelRoles({ admin: true, moderator: true, normal: true });
+                  }}
+                >
+                  <ThemedText>Cancel</ThemedText>
+                </ThemedButton>
+
+                <ThemedButton
+                  style={[styles.modalButton, { backgroundColor: '#007AFF' }]}
+                  onPress={handleCreateChannel}
+                >
+                  <ThemedText style={{ color: '#fff' }}>Create</ThemedText>
+                </ThemedButton>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
+        {/* Edit Channel Modal */}
+        <Modal
+          visible={editChannelVisible}
+          transparent={true}
+          animationType="slide"
+          onRequestClose={() => setEditChannelVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContent, { backgroundColor: theme.background }]}>
+              <ThemedText title style={styles.modalTitle}>Edit Channel</ThemedText>
+
+              <TextInput
+                style={[styles.input, { backgroundColor: theme.uiBackground, color: theme.text, borderColor: theme.iconColor }]}
+                placeholder="Channel Name"
+                placeholderTextColor={theme.iconColor}
+                value={newChannelName}
+                onChangeText={setNewChannelName}
+                maxLength={40}
+              />
+
+              <TextInput
+                style={[styles.input, { backgroundColor: theme.uiBackground, color: theme.text, borderColor: theme.iconColor }]}
+                placeholder="Description"
+                placeholderTextColor={theme.iconColor}
+                value={newChannelDescription}
+                onChangeText={setNewChannelDescription}
+                maxLength={100}
+              />
+
+              <ThemedText style={styles.rolesHeading}>VISIBLE TO ROLES</ThemedText>
+              
+              <Pressable
+                onPress={() => setNewChannelRoles(r => ({ ...r, normal: !r.normal }))}
+                style={styles.checkboxRow}
+              >
+                <Ionicons
+                  name={newChannelRoles.normal ? "checkbox" : "square-outline"}
+                  size={22}
+                  color={newChannelRoles.normal ? "#007AFF" : theme.iconColor}
+                />
+                <ThemedText style={styles.checkboxText}>Normal Members</ThemedText>
+              </Pressable>
+
+              <Pressable
+                onPress={() => setNewChannelRoles(r => ({ ...r, moderator: !r.moderator }))}
+                style={styles.checkboxRow}
+              >
+                <Ionicons
+                  name={newChannelRoles.moderator ? "checkbox" : "square-outline"}
+                  size={22}
+                  color={newChannelRoles.moderator ? "#007AFF" : theme.iconColor}
+                />
+                <ThemedText style={styles.checkboxText}>Moderators</ThemedText>
+              </Pressable>
+
+              <View style={styles.checkboxRow}>
+                <Ionicons name="checkbox" size={22} color="#007AFF" style={{ opacity: 0.5 }} />
+                <ThemedText style={[styles.checkboxText, { opacity: 0.5 }]}>Admins (Always Allowed)</ThemedText>
+              </View>
+
+              <View style={styles.modalButtons}>
+                <ThemedButton
+                  style={[styles.modalButton, { backgroundColor: theme.uiBackground }]}
+                  onPress={() => {
+                    setEditChannelVisible(false);
+                    setChannelToEdit(null);
+                    setNewChannelName('');
+                    setNewChannelDescription('');
+                  }}
+                >
+                  <ThemedText>Cancel</ThemedText>
+                </ThemedButton>
+
+                <ThemedButton
+                  style={[styles.modalButton, { backgroundColor: '#007AFF' }]}
+                  onPress={handleEditChannel}
+                >
+                  <ThemedText style={{ color: '#fff' }}>Save</ThemedText>
+                </ThemedButton>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
+        {/* Invite Users Modal */}
+        <Modal
+          visible={inviteModalVisible}
+          transparent={true}
+          animationType="slide"
+          onRequestClose={() => setInviteModalVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContent, { backgroundColor: theme.background, maxHeight: '80%' }]}>
+              <ThemedText title style={styles.modalTitle}>Invite Users</ThemedText>
+              
+              <FlatList
+                data={usersToInvite}
+                keyExtractor={(item) => item.userId}
+                renderItem={({ item }) => (
+                  <View style={[styles.inviteUserRow, { backgroundColor: theme.uiBackground }]}>
+                    <ThemedText style={styles.inviteUserName}>{item.name}</ThemedText>
+                    <Pressable
+                      style={styles.inviteButton}
+                      onPress={() => handleInviteUser(item.userId)}
+                    >
+                      <Ionicons name="add-circle" size={24} color="#007AFF" />
+                    </Pressable>
+                  </View>
+                )}
+                contentContainerStyle={{ gap: 8 }}
+                ListEmptyComponent={() => (
+                  <View style={styles.emptyContainer}>
+                    <ThemedText style={styles.emptyText}>All users are already in this server.</ThemedText>
+                  </View>
+                )}
+              />
+
+              <ThemedButton
+                style={[styles.closeButton, { backgroundColor: theme.uiBackground, marginTop: 16 }]}
+                onPress={() => setInviteModalVisible(false)}
               >
                 <ThemedText>Close</ThemedText>
               </ThemedButton>
@@ -389,30 +1155,22 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(128,128,128,0.2)',
   },
-  backButton: {
+  menuButton: {
     padding: 8,
     marginRight: 8,
   },
-  avatar: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-    overflow: 'hidden',
-  },
-  avatarImage: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+  headerTitleWrap: {
+    flex: 1,
   },
   headerTitle: {
-    fontSize: 18,
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  channelSubHeader: {
+    fontSize: 13,
+    color: '#007AFF',
     fontWeight: '600',
-    flex: 1,
   },
   optionsButton: {
     padding: 8,
@@ -420,6 +1178,12 @@ const styles = StyleSheet.create({
   messagesList: {
     paddingHorizontal: 16,
     paddingVertical: 10,
+  },
+  messagePressable: {
+    maxWidth: '100%',
+  },
+  messagePressed: {
+    opacity: 0.8,
   },
   messageBubble: {
     padding: 12,
@@ -429,76 +1193,52 @@ const styles = StyleSheet.create({
   },
   myMessage: {
     backgroundColor: '#007AFF',
-    alignSelf: 'flex-end',
     borderBottomRightRadius: 4,
   },
   otherMessage: {
     backgroundColor: '#E5E5EA',
-    alignSelf: 'flex-start',
     borderBottomLeftRadius: 4,
   },
   senderName: {
-    fontSize: 12,
-    fontWeight: '600',
+    fontSize: 11,
+    fontWeight: '700',
     marginBottom: 4,
-    color: '#007AFF',
+    color: '#6849a7',
   },
   timeText: {
     fontSize: 10,
     marginTop: 4,
     alignSelf: 'flex-end',
   },
-  sharedPostContainer: {
-    maxWidth: '85%',
-    marginVertical: 4,
-  },
-  sharedPost: {
-    borderRadius: 12,
-    padding: 12,
-    marginTop: 4,
-  },
-  sharedPostImage: {
-    width: '100%',
-    height: 150,
-    borderRadius: 8,
-    marginBottom: 8,
-  },
-  sharedPostContent: {
-    fontSize: 14,
-    marginBottom: 4,
-  },
-  sharedPostAuthor: {
-    fontSize: 12,
-    opacity: 0.6,
-  },
   emptyContainer: {
     alignItems: 'center',
     paddingVertical: 60,
-    transform: [{ scaleY: -1 }],
   },
   emptyText: {
     marginTop: 12,
-    fontSize: 16,
+    fontSize: 15,
     opacity: 0.5,
   },
   emptySubtext: {
     marginTop: 4,
-    fontSize: 14,
+    fontSize: 13,
     opacity: 0.4,
   },
   inputContainer: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingTop: 8,
     borderTopWidth: 1,
   },
   input: {
     flex: 1,
     borderRadius: 20,
     paddingHorizontal: 16,
-    paddingVertical: 10,
+    paddingTop: 10,
+    paddingBottom: 10,
     marginRight: 8,
+    minHeight: 40,
     maxHeight: 100,
     fontSize: 15,
   },
@@ -508,51 +1248,266 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     justifyContent: 'center',
     alignItems: 'center',
+    marginBottom: 2,
   },
-  modalOverlay: {
+  // Sidebar/Drawer Styles
+  drawerOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'flex-end',
+    flexDirection: 'row',
   },
-  optionsModal: {
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 20,
-    paddingBottom: 40,
+  drawerDismiss: {
+    flex: 1,
   },
-  addMemberModal: {
-    margin: 20,
-    borderRadius: 20,
-    padding: 20,
-    maxHeight: '80%',
+  drawerContent: {
+    width: SCREEN_WIDTH * 0.75,
+    height: '100%',
+    padding: 16,
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOpacity: 0.2,
+    shadowOffset: { width: 4, height: 0 },
+    shadowRadius: 6,
   },
-  modalTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    marginBottom: 20,
-    textAlign: 'center',
-  },
-  optionButton: {
+  drawerHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 16,
-    gap: 12,
+    gap: 10,
+    paddingBottom: 12,
   },
-  optionText: {
+  drawerServerName: {
     fontSize: 16,
+    fontWeight: '700',
+    flex: 1,
   },
-  userItem: {
+  drawerDivider: {
+    height: 1,
+    backgroundColor: 'rgba(128,128,128,0.2)',
+    marginBottom: 16,
+  },
+  channelsHeaderContainer: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    marginBottom: 8,
+    paddingHorizontal: 4,
+  },
+  channelsSectionTitle: {
+    fontSize: 11,
+    fontWeight: '700',
+    opacity: 0.6,
+  },
+  drawerChannelsList: {
+    paddingBottom: 40,
+  },
+  channelItemWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    marginBottom: 4,
+  },
+  channelButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  channelText: {
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  channelActions: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  channelIconBtn: {
+    padding: 4,
+  },
+  // Modal General Styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  dismissArea: {
+    flex: 1,
+    width: '100%',
+  },
+  optionsModalContent: {
+    width: '100%',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 20,
+    maxHeight: '85%',
+  },
+  modalContent: {
+    width: '85%',
+    padding: 20,
+    borderRadius: 20,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    marginBottom: 16,
+    textAlign: 'center',
+  },
+  serverDetailsSummary: {
+    marginBottom: 16,
     padding: 12,
+    borderRadius: 8,
+    backgroundColor: 'rgba(128,128,128,0.05)',
+  },
+  serverDescText: {
+    fontSize: 14,
+    lineHeight: 18,
+    opacity: 0.8,
+  },
+  serverActionsGrid: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 20,
+  },
+  actionBtnItem: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
     borderRadius: 12,
+  },
+  actionBtnText: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  memberListTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    opacity: 0.5,
+    marginBottom: 8,
+  },
+  membersListScroll: {
+    maxHeight: 250,
+    marginBottom: 12,
+  },
+  memberItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 10,
+    borderRadius: 12,
+    marginBottom: 6,
+  },
+  avatarMini: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 10,
+    overflow: 'hidden',
+  },
+  avatarMiniImg: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+  },
+  memberInfo: {
+    flex: 1,
+  },
+  memberName: {
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  memberEmail: {
+    fontSize: 11,
+    opacity: 0.5,
+    marginTop: 1,
+  },
+  roleBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  roleBadgeOwner: {
+    backgroundColor: 'rgba(255, 149, 0, 0.15)',
+  },
+  roleBadgeMod: {
+    backgroundColor: 'rgba(90, 200, 250, 0.15)',
+  },
+  roleBadgeNormal: {
+    backgroundColor: 'rgba(142, 142, 147, 0.15)',
+  },
+  roleBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#007AFF',
+  },
+  roleOptionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 14,
+    borderRadius: 12,
+    gap: 12,
     marginBottom: 8,
   },
   closeButton: {
     padding: 14,
     borderRadius: 12,
     alignItems: 'center',
-    marginTop: 16,
+  },
+  input: {
+    padding: 14,
+    borderRadius: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    fontSize: 15,
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 8,
+  },
+  modalButton: {
+    flex: 1,
+    padding: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  // Checkbox UI
+  rolesHeading: {
+    fontSize: 12,
+    fontWeight: '700',
+    opacity: 0.6,
+    marginTop: 8,
+    marginBottom: 8,
+  },
+  checkboxRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 8,
+  },
+  checkboxText: {
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  // Invite List
+  inviteUserRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 12,
+    borderRadius: 12,
+  },
+  inviteUserName: {
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  inviteButton: {
+    padding: 2,
   },
 });

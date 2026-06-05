@@ -26,14 +26,26 @@ begin
   if exists (select 1 from pg_publication where pubname = 'supabase_realtime')
      and not exists (
        select 1
-       from pg_publication_tables pt
-       join pg_class c on c.oid = pt.prrelid
-       join pg_namespace n on n.oid = c.relnamespace
-       where pt.pubname = 'supabase_realtime'
-         and n.nspname = 'public'
-         and c.relname = 'notifications'
+       from pg_publication_tables
+       where pubname = 'supabase_realtime'
+         and schemaname = 'public'
+         and tablename = 'notifications'
      ) then
     execute 'alter publication supabase_realtime add table public.notifications';
+  end if;
+end $$;
+
+do $$
+begin
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime')
+     and not exists (
+       select 1
+       from pg_publication_tables
+       where pubname = 'supabase_realtime'
+         and schemaname = 'public'
+         and tablename = 'direct_messages'
+     ) then
+    execute 'alter publication supabase_realtime add table public.direct_messages';
   end if;
 end $$;
 

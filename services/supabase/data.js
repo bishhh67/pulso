@@ -1101,6 +1101,27 @@ export async function sendDirectMessage(chatId, message) {
   return normalizeMessage(data);
 }
 
+export async function deleteDirectMessage(messageId, userId) {
+  if (!messageId || !userId) {
+    throw new Error('Missing message id or user id');
+  }
+
+  const { data, error } = await supabase
+    .from('direct_messages')
+    .delete()
+    .eq('id', messageId)
+    .eq('send_by', userId)
+    .select('*')
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) {
+    throw new Error('Message not found or not authorized');
+  }
+
+  return normalizeMessage(data);
+}
+
 export async function listNotes(department, semester, subject, category) {
   const { data, error } = await supabase
     .from('notes')

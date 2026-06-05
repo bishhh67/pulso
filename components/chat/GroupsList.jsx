@@ -1,9 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { View, StyleSheet, FlatList, Image, Pressable, ActivityIndicator, Modal, TextInput, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { auth } from '../../services/supabase/auth';
-import { listGroupsForUser, createGroup } from '../../services/supabase/data';
+import { listServersForUser, createServer, listAllServers, joinServer } from '../../services/supabase/server';
 import { getFileUrl } from '../../src/storage/storageProvider';
 import ThemedView from '../ThemedView';
 import ThemedText from '../ThemedText';
@@ -16,75 +16,122 @@ export default function GroupsList() {
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme] ?? Colors.light;
 
-  const [groups, setGroups] = useState([]);
+  const [activeTab, setActiveTab] = useState('mine'); // 'mine' or 'discover'
+  const [servers, setServers] = useState([]);
+  const [discoverServers, setDiscoverServers] = useState([]);
+  const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
+  
   const [createModalVisible, setCreateModalVisible] = useState(false);
-  const [groupName, setGroupName] = useState('');
-  const [groupDescription, setGroupDescription] = useState('');
+  const [serverName, setServerName] = useState('');
+  const [serverDescription, setServerDescription] = useState('');
   const [creating, setCreating] = useState(false);
 
-  useEffect(() => {
-    loadGroups();
-  }, []);
-
-  const loadGroups = async () => {
+  const loadServers = useCallback(async () => {
     try {
       if (!auth.currentUser) {
         setLoading(false);
         return;
       }
+      setLoading(true);
+      
+      const mine = await listServersForUser(auth.currentUser.uid);
+      setServers(mine);
 
-      setGroups(await listGroupsForUser(auth.currentUser.uid));
+      const all = await listAllServers();
+      // Filter discover servers to those the user is NOT a member of
+      const mineIds = new Set(mine.map((s) => s.id));
+      const discoverable = all.filter((s) => !mineIds.has(s.id));
+      setDiscoverServers(discoverable);
+
       setLoading(false);
     } catch (error) {
-      console.error('Error loading groups:', error);
+      console.error('Error loading servers:', error);
       setLoading(false);
     }
-  };
+  }, []);
 
-  const handleCreateGroup = async () => {
-    if (!groupName.trim()) {
-      Alert.alert('Error', 'Please enter a group name');
+  useEffect(() => {
+    loadServers();
+  }, [loadServers]);
+
+  const handleCreateServer = async () => {
+    if (!serverName.trim()) {
+      Alert.alert('Error', 'Please enter a server name');
       return;
     }
 
     setCreating(true);
 
     try {
-      await createGroup({
-        name: groupName.trim(),
-        description: groupDescription.trim(),
+      const newServer = await createServer({
+        name: serverName.trim(),
+        description: serverDescription.trim(),
         image: null,
-        createdBy: auth.currentUser.uid,
-        members: [auth.currentUser.uid],
-        admins: [auth.currentUser.uid],
+        ownerId: auth.currentUser.uid,
       });
       
-      Alert.alert('Success', 'Group created successfully!');
+      Alert.alert('Success', 'Server created successfully!');
       setCreateModalVisible(false);
-      setGroupName('');
-      setGroupDescription('');
-      loadGroups();
+      setServerName('');
+      setServerDescription('');
+      
+      // Reload lists and navigate directly to the new server
+      await loadServers();
+      handleServerPress(newServer);
     } catch (error) {
-      console.error('Error creating group:', error);
-      Alert.alert('Error', 'Failed to create group');
+      console.error('Error creating server:', error);
+      Alert.alert('Error', 'Failed to create server');
     } finally {
       setCreating(false);
     }
   };
 
-  const handleGroupPress = (group) => {
+  const handleServerPress = (server) => {
     router.push({
       pathname: '/chat/groupChat',
       params: {
-        groupId: group.id,
-        groupName: group.name,
-        groupImage: group.imagePath || group.image || '',
+        groupId: server.id,
+        groupName: server.name,
+        groupImage: server.imagePath || server.image || '',
       }
     });
   };
 
-  if (loading) {
+  const handleJoinServer = async (server) => {
+    Alert.alert(
+      'Join Server',
+      `Are you sure you want to join "${server.name}"?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Join',
+          onPress: async () => {
+            try {
+              setLoading(true);
+              await joinServer(server.id, auth.currentUser.uid);
+              Alert.alert('Success', `You joined ${server.name}!`);
+              await loadServers();
+              handleServerPress(server);
+            } catch (error) {
+              console.error('Error joining server:', error);
+              Alert.alert('Error', 'Failed to join server');
+            } finally {
+              setLoading(false);
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  // Filter display lists based on search query
+  const displayedServers = (activeTab === 'mine' ? servers : discoverServers).filter(s =>
+    s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (s.description && s.description.toLowerCase().includes(searchQuery.toLowerCase()))
+  );
+
+  if (loading && servers.length === 0 && discoverServers.length === 0) {
     return (
       <ThemedView style={styles.centerContainer}>
         <ActivityIndicator size="large" color={theme.iconColorFocused} />
@@ -96,33 +143,69 @@ export default function GroupsList() {
     return (
       <ThemedView style={styles.centerContainer}>
         <Ionicons name="people-outline" size={64} color={theme.iconColor} style={{ opacity: 0.3 }} />
-        <ThemedText style={styles.emptyText}>Please log in to join groups</ThemedText>
+        <ThemedText style={styles.emptyText}>Please log in to view servers</ThemedText>
       </ThemedView>
     );
   }
 
   return (
     <ThemedView style={styles.container}>
-      {/* Create Group Button */}
-      <ThemedButton
-        style={[styles.createButton, { backgroundColor: '#007AFF' }]}
-        onPress={() => setCreateModalVisible(true)}
-      >
-        <Ionicons name="add-circle" size={20} color="#fff" />
-        <ThemedText style={styles.createButtonText}>Create Group</ThemedText>
-      </ThemedButton>
+      {/* Search Bar */}
+      <View style={[styles.searchContainer, { backgroundColor: theme.uiBackground }]}>
+        <Ionicons name="search" size={20} color={theme.iconColor} />
+        <TextInput
+          style={[styles.searchInput, { color: theme.text }]}
+          placeholder="Search servers..."
+          placeholderTextColor={theme.iconColor}
+          value={searchQuery}
+          onChangeText={setSearchQuery}
+        />
+        {searchQuery.length > 0 && (
+          <Pressable onPress={() => setSearchQuery('')}>
+            <Ionicons name="close-circle" size={18} color={theme.iconColor} />
+          </Pressable>
+        )}
+      </View>
 
+      {/* Internal Tab Bar */}
+      <View style={styles.tabsContainer}>
+        <Pressable
+          style={[
+            styles.tabButton,
+            activeTab === 'mine' && { borderBottomColor: '#007AFF', borderBottomWidth: 2 }
+          ]}
+          onPress={() => setActiveTab('mine')}
+        >
+          <ThemedText style={[styles.tabText, activeTab === 'mine' && { color: '#007AFF', fontWeight: 'bold' }]}>
+            My Servers
+          </ThemedText>
+        </Pressable>
+
+        <Pressable
+          style={[
+            styles.tabButton,
+            activeTab === 'discover' && { borderBottomColor: '#007AFF', borderBottomWidth: 2 }
+          ]}
+          onPress={() => setActiveTab('discover')}
+        >
+          <ThemedText style={[styles.tabText, activeTab === 'discover' && { color: '#007AFF', fontWeight: 'bold' }]}>
+            Discover
+          </ThemedText>
+        </Pressable>
+      </View>
+
+      {/* Main List */}
       <FlatList
-        data={groups}
+        data={displayedServers}
         keyExtractor={(item) => item.id}
         renderItem={({ item }) => (
           <Pressable
             style={({ pressed }) => [
-              styles.groupItem,
+              styles.serverItem,
               { backgroundColor: theme.uiBackground },
               pressed && { opacity: 0.7 }
             ]}
-            onPress={() => handleGroupPress(item)}
+            onPress={() => activeTab === 'mine' ? handleServerPress(item) : handleJoinServer(item)}
           >
             <View style={[styles.avatar, { backgroundColor: theme.background }]}>
               {(item.imagePath || item.image) && (
@@ -133,27 +216,45 @@ export default function GroupsList() {
               )}
             </View>
 
-            <View style={styles.groupInfo}>
-              <ThemedText style={styles.groupName}>{item.name}</ThemedText>
-              <ThemedText style={styles.groupDescription} numberOfLines={1}>
-                {item.description || `${item.members?.length || 0} members`}
+            <View style={styles.serverInfo}>
+              <ThemedText style={styles.serverName}>{item.name}</ThemedText>
+              <ThemedText style={styles.serverDescription} numberOfLines={2}>
+                {item.description || 'No description provided.'}
               </ThemedText>
             </View>
 
-            <Ionicons name="chevron-forward" size={20} color={theme.iconColor} />
+            {activeTab === 'mine' ? (
+              <Ionicons name="chevron-forward" size={20} color={theme.iconColor} />
+            ) : (
+              <View style={styles.joinBadge}>
+                <ThemedText style={styles.joinText}>Join</ThemedText>
+              </View>
+            )}
           </Pressable>
         )}
         contentContainerStyle={styles.listContent}
         ListEmptyComponent={() => (
           <View style={styles.emptyContainer}>
             <Ionicons name="people-outline" size={64} color={theme.iconColor} style={{ opacity: 0.3 }} />
-            <ThemedText style={styles.emptyText}>No groups yet</ThemedText>
-            <ThemedText style={styles.emptySubtext}>Create a group to get started!</ThemedText>
+            <ThemedText style={styles.emptyText}>
+              {activeTab === 'mine' ? 'You have not joined any servers yet.' : 'No new servers to discover.'}
+            </ThemedText>
+            {activeTab === 'mine' && (
+              <ThemedText style={styles.emptySubtext}>Head over to the Discover tab to find communities!</ThemedText>
+            )}
           </View>
         )}
       />
 
-      {/* Create Group Modal */}
+      {/* Floating Create Server Button */}
+      <ThemedButton
+        style={[styles.floatingButton, { backgroundColor: '#007AFF' }]}
+        onPress={() => setCreateModalVisible(true)}
+      >
+        <Ionicons name="add" size={28} color="#fff" />
+      </ThemedButton>
+
+      {/* Create Server Modal */}
       <Modal
         visible={createModalVisible}
         transparent={true}
@@ -162,23 +263,23 @@ export default function GroupsList() {
       >
         <View style={styles.modalOverlay}>
           <View style={[styles.modalContent, { backgroundColor: theme.background }]}>
-            <ThemedText title style={styles.modalTitle}>Create Group</ThemedText>
+            <ThemedText title style={styles.modalTitle}>Create a Server</ThemedText>
 
             <TextInput
               style={[styles.input, { backgroundColor: theme.uiBackground, color: theme.text, borderColor: theme.iconColor }]}
-              placeholder="Group Name"
+              placeholder="Server Name"
               placeholderTextColor={theme.iconColor}
-              value={groupName}
-              onChangeText={setGroupName}
+              value={serverName}
+              onChangeText={setServerName}
               maxLength={50}
             />
 
             <TextInput
               style={[styles.input, styles.textArea, { backgroundColor: theme.uiBackground, color: theme.text, borderColor: theme.iconColor }]}
-              placeholder="Description (optional)"
+              placeholder="Describe your server community..."
               placeholderTextColor={theme.iconColor}
-              value={groupDescription}
-              onChangeText={setGroupDescription}
+              value={serverDescription}
+              onChangeText={setServerDescription}
               multiline
               maxLength={200}
             />
@@ -188,8 +289,8 @@ export default function GroupsList() {
                 style={[styles.modalButton, { backgroundColor: theme.uiBackground }]}
                 onPress={() => {
                   setCreateModalVisible(false);
-                  setGroupName('');
-                  setGroupDescription('');
+                  setServerName('');
+                  setServerDescription('');
                 }}
               >
                 <ThemedText>Cancel</ThemedText>
@@ -197,7 +298,7 @@ export default function GroupsList() {
 
               <ThemedButton
                 style={[styles.modalButton, { backgroundColor: '#007AFF' }]}
-                onPress={handleCreateGroup}
+                onPress={handleCreateServer}
                 disabled={creating}
               >
                 {creating ? (
@@ -223,30 +324,49 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  createButton: {
+  searchContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    padding: 12,
-    margin: 16,
+    paddingHorizontal: 12,
+    marginHorizontal: 16,
+    marginVertical: 12,
     borderRadius: 12,
-    gap: 8,
+    height: 44,
   },
-  createButtonText: {
-    color: '#fff',
-    fontSize: 16,
+  searchInput: {
+    flex: 1,
+    marginLeft: 8,
+    fontSize: 15,
+    paddingVertical: 8,
+  },
+  tabsContainer: {
+    flexDirection: 'row',
+    marginHorizontal: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(128,128,128,0.1)',
+    marginBottom: 8,
+  },
+  tabButton: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 12,
+  },
+  tabText: {
+    fontSize: 15,
     fontWeight: '600',
+    opacity: 0.8,
   },
   listContent: {
     padding: 16,
-    paddingTop: 0,
+    paddingTop: 8,
+    paddingBottom: 80,
   },
-  groupItem: {
+  serverItem: {
     flexDirection: 'row',
     alignItems: 'center',
     padding: 12,
     borderRadius: 12,
-    marginBottom: 8,
+    marginBottom: 10,
   },
   avatar: {
     width: 56,
@@ -262,17 +382,29 @@ const styles = StyleSheet.create({
     height: 56,
     borderRadius: 28,
   },
-  groupInfo: {
+  serverInfo: {
     flex: 1,
+    marginRight: 8,
   },
-  groupName: {
+  serverName: {
     fontSize: 16,
     fontWeight: '600',
     marginBottom: 2,
   },
-  groupDescription: {
+  serverDescription: {
     fontSize: 13,
     opacity: 0.6,
+  },
+  joinBadge: {
+    backgroundColor: '#007AFF',
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 12,
+  },
+  joinText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
   },
   emptyContainer: {
     alignItems: 'center',
@@ -290,6 +422,21 @@ const styles = StyleSheet.create({
     fontSize: 14,
     opacity: 0.4,
     textAlign: 'center',
+  },
+  floatingButton: {
+    position: 'absolute',
+    bottom: 24,
+    right: 24,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOpacity: 0.2,
+    shadowOffset: { width: 0, height: 2 },
+    shadowRadius: 4,
   },
   modalOverlay: {
     flex: 1,

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   StyleSheet,
@@ -11,16 +11,21 @@ import {
   ActivityIndicator,
   Alert,
   Modal,
+  Keyboard,
 } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { auth } from '../../services/supabase/auth';
+import { supabase } from '../../services/supabase/client';
 import {
   areUsersFriends,
+  deleteDirectMessage,
   getDirectChatPreference,
   hideDirectChat,
   listDirectMessages,
   muteDirectChat,
+  normalizeMessage,
   sendDirectMessage,
   unmuteDirectChat,
 } from '../../services/supabase/data';
@@ -37,6 +42,7 @@ export default function DirectMessage() {
   const params = useLocalSearchParams();
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme] ?? Colors.light;
+  const insets = useSafeAreaInsets();
 
   const otherUserId = String(params.otherUserId || '');
   const otherUserName = params.otherUserName;
@@ -46,12 +52,44 @@ export default function DirectMessage() {
   const [text, setText] = useState('');
   const [loading, setLoading] = useState(true);
   const [accessDenied, setAccessDenied] = useState(false);
-  const [menuVisible, setMenuVisible] = useState(false);
+  const [chatMenuVisible, setChatMenuVisible] = useState(false);
+  const [messageMenuVisible, setMessageMenuVisible] = useState(false);
+  const [selectedMessage, setSelectedMessage] = useState(null);
   const [chatPreference, setChatPreference] = useState(null);
-  const flatListRef = useRef();
+  const [deletingMessageId, setDeletingMessageId] = useState(null);
+  const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
+  const flatListRef = useRef(null);
+  const directMessagesChannelRef = useRef(null);
 
-  // Create consistent chat ID (sorted user IDs)
-  const chatId = [String(auth.currentUser?.uid || ''), otherUserId].sort().join('_');
+  const currentUserId = String(auth.currentUser?.uid || '');
+
+  useEffect(() => {
+    const showSubscription = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      () => {
+        setIsKeyboardVisible(true);
+        setTimeout(() => {
+          flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+        }, 100);
+      }
+    );
+    const hideSubscription = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => setIsKeyboardVisible(false)
+    );
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, []);
+  const chatId = [currentUserId, otherUserId].sort().join('_');
+  const canDeleteSelectedMessage = selectedMessage?.sendBy === currentUserId;
+
+  const closeMessageMenu = () => {
+    setMessageMenuVisible(false);
+    setSelectedMessage(null);
+  };
 
   const loadConversation = async () => {
     if (!auth.currentUser || !otherUserId) {
@@ -74,6 +112,7 @@ export default function DirectMessage() {
 
       setMessages(messagesList);
       setChatPreference(preference);
+      setAccessDenied(false);
       setLoading(false);
     } catch (error) {
       console.error('Error verifying chat access:', error);
@@ -82,12 +121,64 @@ export default function DirectMessage() {
   };
 
   useEffect(() => {
-    void loadConversation();
-    const interval = setInterval(() => {
-      void loadConversation();
-    }, 3000);
-    return () => clearInterval(interval);
-  }, [chatId]);
+    let isMounted = true;
+
+    const setupRealtime = async () => {
+      if (!auth.currentUser || !otherUserId) {
+        setLoading(false);
+        return;
+      }
+
+      await loadConversation();
+
+      if (!isMounted) return;
+
+      if (directMessagesChannelRef.current) {
+        void supabase.removeChannel(directMessagesChannelRef.current);
+        directMessagesChannelRef.current = null;
+      }
+
+      const channelName = `direct-messages-${chatId}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const channel = supabase.channel(channelName);
+
+      channel.on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'direct_messages' },
+        (payload) => {
+          if (!isMounted) return;
+
+          if (payload.eventType === 'INSERT' && payload.new) {
+            if (payload.new.chat_id !== chatId) return;
+            const message = normalizeMessage(payload.new);
+            if (!message) return;
+
+            setMessages((prev) => [message, ...prev.filter((item) => item.id !== message.id)]);
+            return;
+          }
+
+          if (payload.eventType === 'DELETE' && payload.old?.id) {
+            setMessages((prev) => prev.filter((item) => item.id !== payload.old.id));
+            return;
+          }
+
+          void loadConversation();
+        }
+      );
+
+      channel.subscribe();
+      directMessagesChannelRef.current = channel;
+    };
+
+    void setupRealtime();
+
+    return () => {
+      isMounted = false;
+      if (directMessagesChannelRef.current) {
+        void supabase.removeChannel(directMessagesChannelRef.current);
+        directMessagesChannelRef.current = null;
+      }
+    };
+  }, [chatId, otherUserId]);
 
   const sendMessage = async () => {
     if (!text.trim() || !auth.currentUser) return;
@@ -104,7 +195,7 @@ export default function DirectMessage() {
         type: 'text',
       });
 
-      setMessages((prev) => [sentMessage, ...prev]);
+      setMessages((prev) => [sentMessage, ...prev.filter((item) => item.id !== sentMessage.id)]);
       void sendDirectMessagePushNotification({
         recipientId: otherUserId,
         senderId: auth.currentUser.uid,
@@ -114,17 +205,18 @@ export default function DirectMessage() {
         console.error('Error sending direct message notification:', error);
       });
 
-      // Scroll to bottom
       setTimeout(() => {
         flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
       }, 100);
     } catch (error) {
       console.error('Error sending message:', error);
-      setText(messageText); // Restore text on error
+      setText(messageText);
     }
   };
 
   const handleDeleteChat = () => {
+    if (!currentUserId) return;
+
     Alert.alert(
       'Delete Chat',
       'This will hide the conversation from your inbox until a new message arrives.',
@@ -135,8 +227,8 @@ export default function DirectMessage() {
           style: 'destructive',
           onPress: async () => {
             try {
-              await hideDirectChat(auth.currentUser.uid, otherUserId);
-              setMenuVisible(false);
+              await hideDirectChat(currentUserId, otherUserId);
+              setChatMenuVisible(false);
               router.back();
             } catch (error) {
               console.error('Error deleting chat:', error);
@@ -149,13 +241,15 @@ export default function DirectMessage() {
   };
 
   const handleMuteToggle = async () => {
+    if (!currentUserId) return;
+
     try {
       if (chatPreference?.mutedAt) {
-        await unmuteDirectChat(auth.currentUser.uid, otherUserId);
+        await unmuteDirectChat(currentUserId, otherUserId);
       } else {
-        await muteDirectChat(auth.currentUser.uid, otherUserId);
+        await muteDirectChat(currentUserId, otherUserId);
       }
-      setMenuVisible(false);
+      setChatMenuVisible(false);
       await loadConversation();
     } catch (error) {
       console.error('Error updating mute state:', error);
@@ -163,38 +257,85 @@ export default function DirectMessage() {
     }
   };
 
+  const promptDeleteSelectedMessage = () => {
+    const messageToDelete = selectedMessage;
+    if (!messageToDelete || messageToDelete.sendBy !== currentUserId) {
+      closeMessageMenu();
+      return;
+    }
+
+    closeMessageMenu();
+
+    Alert.alert('Delete Message', 'This message will be removed for everyone in the chat.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          setDeletingMessageId(messageToDelete.id);
+          setMessages((prev) => prev.filter((item) => item.id !== messageToDelete.id));
+
+          try {
+            await deleteDirectMessage(messageToDelete.id, currentUserId);
+          } catch (error) {
+            console.error('Error deleting message:', error);
+            await loadConversation();
+            Alert.alert('Error', 'Failed to delete message');
+          } finally {
+            setDeletingMessageId(null);
+          }
+        },
+      },
+    ]);
+  };
+
   const formatTime = (timestamp) => {
     if (!timestamp?.toDate) return '';
-    
+
     const date = timestamp.toDate();
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
   const renderMessage = ({ item }) => {
-    const isMe = item.sendBy === auth.currentUser?.uid;
+    const isMe = item.sendBy === currentUserId;
+    const isDeleting = deletingMessageId === item.id;
 
     return (
-      <View
-        style={[
-          styles.messageBubble,
-          isMe ? styles.myMessage : styles.otherMessage,
+      <Pressable
+        onLongPress={() => {
+          setSelectedMessage(item);
+          setMessageMenuVisible(true);
+        }}
+        delayLongPress={250}
+        style={({ pressed }) => [
+          styles.messagePressable,
+          isMe ? styles.myMessageAlign : styles.otherMessageAlign,
+          pressed && styles.messagePressed,
+          isDeleting && styles.messageDeleting,
         ]}
       >
-        <ThemedText style={{ color: isMe ? '#fff' : theme.text }}>
-          {item.text}
-        </ThemedText>
-        {item.createdAt && (
-          <ThemedText style={[styles.timeText, { color: isMe ? '#ddd' : theme.iconColor }]}>
-            {formatTime(item.createdAt)}
+        <View
+          style={[
+            styles.messageBubble,
+            isMe ? styles.myMessage : styles.otherMessage,
+          ]}
+        >
+          <ThemedText style={{ color: isMe ? '#fff' : theme.text }}>
+            {item.text}
           </ThemedText>
-        )}
-      </View>
+          {item.createdAt && (
+            <ThemedText style={[styles.timeText, { color: isMe ? '#ddd' : theme.iconColor }]}>
+              {formatTime(item.createdAt)}
+            </ThemedText>
+          )}
+        </View>
+      </Pressable>
     );
   };
 
   if (loading) {
     return (
-      <ThemedView style={styles.centerContainer}>
+      <ThemedView safe={true} style={styles.centerContainer}>
         <ActivityIndicator size="large" color={theme.iconColorFocused} />
       </ThemedView>
     );
@@ -202,7 +343,7 @@ export default function DirectMessage() {
 
   if (accessDenied) {
     return (
-      <ThemedView style={styles.centerContainer}>
+      <ThemedView safe={true} style={styles.centerContainer}>
         <Ionicons name="lock-closed-outline" size={64} color={theme.iconColor} style={{ opacity: 0.3 }} />
         <ThemedText style={styles.emptyText}>Only accepted friends can chat</ThemedText>
         <ThemedButton onPress={() => router.back()} style={{ marginTop: 16 }}>
@@ -213,14 +354,12 @@ export default function DirectMessage() {
   }
 
   return (
-    <KeyboardAvoidingView
-      style={{ flex: 1 }}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={100}
+    <SafeAreaView
+      edges={['top', 'left', 'right']}
+      style={[styles.safeArea, { backgroundColor: theme.background }]}
     >
-      <ThemedView style={styles.container}>
-        {/* Header */}
-        <View style={[styles.header, { backgroundColor: theme.uiBackground }]}>
+      <View style={styles.container}>
+        <View style={[styles.header, { backgroundColor: theme.uiBackground, borderBottomColor: theme.iconColor }]}>
           <ThemedButton onPress={() => router.back()} style={styles.backButton}>
             <Ionicons name="arrow-back" size={24} color={theme.iconColor} />
           </ThemedButton>
@@ -242,57 +381,68 @@ export default function DirectMessage() {
             )}
           </View>
 
-          <Pressable onPress={() => setMenuVisible(true)} style={styles.menuButton} hitSlop={8}>
+          <Pressable onPress={() => setChatMenuVisible(true)} style={styles.menuButton} hitSlop={8}>
             <Ionicons name="ellipsis-vertical" size={20} color={theme.iconColor} />
           </Pressable>
         </View>
 
-        {/* Messages */}
-        <FlatList
-          ref={flatListRef}
-          data={messages}
-          inverted
-          keyExtractor={(item) => item.id}
-          renderItem={renderMessage}
-          contentContainerStyle={styles.messagesList}
-          ListEmptyComponent={() => (
-            <View style={styles.emptyContainer}>
-              <Ionicons name="chatbubbles-outline" size={48} color={theme.iconColor} style={{ opacity: 0.3 }} />
-              <ThemedText style={styles.emptyText}>No messages yet</ThemedText>
-              <ThemedText style={styles.emptySubtext}>Send a message to start chatting!</ThemedText>
-            </View>
-          )}
-        />
-
-        {/* Input */}
-        <View style={[styles.inputContainer, { backgroundColor: theme.background, borderTopColor: theme.iconColor }]}>
-          <TextInput
-            value={text}
-            onChangeText={setText}
-            placeholder="Type a message..."
-            placeholderTextColor={theme.iconColor}
-            style={[styles.input, { backgroundColor: theme.uiBackground, color: theme.text }]}
-            multiline
-            maxLength={2000}
-          />
-          <Pressable
-            onPress={sendMessage}
-            disabled={!text.trim()}
-            style={[
-              styles.sendButton,
-              { backgroundColor: text.trim() ? '#007AFF' : theme.uiBackground }
+        <KeyboardAvoidingView
+          style={styles.chatBody}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top + 60 : 0}
+        >
+          <FlatList
+            ref={flatListRef}
+            style={styles.messagesListView}
+            data={messages}
+            inverted
+            keyExtractor={(item) => item.id}
+            renderItem={renderMessage}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="interactive"
+            contentContainerStyle={[
+              styles.messagesList,
+              { paddingBottom: insets.bottom + 12 },
             ]}
-          >
-            <Ionicons
-              name="send"
-              size={20}
-              color={text.trim() ? '#fff' : theme.iconColor}
-            />
-          </Pressable>
-        </View>
+            ListEmptyComponent={() => (
+              <View style={styles.emptyContainer}>
+                <Ionicons name="chatbubbles-outline" size={48} color={theme.iconColor} style={{ opacity: 0.3 }} />
+                <ThemedText style={styles.emptyText}>No messages yet</ThemedText>
+                <ThemedText style={styles.emptySubtext}>Send a message to start chatting!</ThemedText>
+              </View>
+            )}
+          />
 
-        <Modal visible={menuVisible} transparent animationType="fade" onRequestClose={() => setMenuVisible(false)}>
-          <Pressable style={styles.menuOverlay} onPress={() => setMenuVisible(false)}>
+          <View style={[styles.inputContainer, { backgroundColor: theme.background, borderTopColor: theme.iconColor, paddingBottom: isKeyboardVisible ? 8 : Math.max(insets.bottom, 8) }]}>
+            <TextInput
+              value={text}
+              onChangeText={setText}
+              placeholder="Type a message..."
+              placeholderTextColor={theme.iconColor}
+              style={[styles.input, { backgroundColor: theme.uiBackground, color: theme.text }]}
+              multiline
+              maxLength={2000}
+              textAlignVertical="top"
+            />
+            <Pressable
+              onPress={sendMessage}
+              disabled={!text.trim()}
+              style={[
+                styles.sendButton,
+                { backgroundColor: text.trim() ? '#007AFF' : theme.uiBackground }
+              ]}
+            >
+              <Ionicons
+                name="send"
+                size={20}
+                color={text.trim() ? '#fff' : theme.iconColor}
+              />
+            </Pressable>
+          </View>
+        </KeyboardAvoidingView>
+
+        <Modal visible={chatMenuVisible} transparent animationType="fade" onRequestClose={() => setChatMenuVisible(false)}>
+          <Pressable style={[styles.menuOverlay, { paddingTop: insets.top + 64 }]} onPress={() => setChatMenuVisible(false)}>
             <Pressable style={[styles.menuCard, { backgroundColor: theme.background }]} onPress={() => {}}>
               <Pressable style={styles.menuItem} onPress={handleDeleteChat}>
                 <Ionicons name="trash-outline" size={18} color="#FF3B30" />
@@ -308,12 +458,33 @@ export default function DirectMessage() {
             </Pressable>
           </Pressable>
         </Modal>
-      </ThemedView>
-    </KeyboardAvoidingView>
+
+        <Modal visible={messageMenuVisible} transparent animationType="fade" onRequestClose={closeMessageMenu}>
+          <Pressable style={styles.messageMenuOverlay} onPress={closeMessageMenu}>
+            <Pressable style={[styles.messageMenuCard, { backgroundColor: theme.background }]} onPress={() => {}}>
+              {canDeleteSelectedMessage && (
+                <Pressable style={styles.messageMenuItem} onPress={promptDeleteSelectedMessage}>
+                  <Ionicons name="trash-outline" size={18} color="#FF3B30" />
+                  <ThemedText style={styles.messageMenuDanger}>Delete Message</ThemedText>
+                </Pressable>
+              )}
+
+              <Pressable style={styles.messageMenuItem} onPress={closeMessageMenu}>
+                <Ionicons name="close-outline" size={18} color={theme.iconColor} />
+                <ThemedText style={styles.messageMenuText}>Cancel</ThemedText>
+              </Pressable>
+            </Pressable>
+          </Pressable>
+        </Modal>
+      </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+  },
   container: {
     flex: 1,
   },
@@ -328,7 +499,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(128,128,128,0.2)',
   },
   backButton: {
     padding: 8,
@@ -364,9 +534,31 @@ const styles = StyleSheet.create({
     fontSize: 12,
     opacity: 0.5,
   },
+  chatBody: {
+    flex: 1,
+  },
+  messagesListView: {
+    flex: 1,
+  },
   messagesList: {
+    flexGrow: 1,
     paddingHorizontal: 16,
     paddingVertical: 10,
+  },
+  messagePressable: {
+    maxWidth: '100%',
+  },
+  myMessageAlign: {
+    alignSelf: 'flex-end',
+  },
+  otherMessageAlign: {
+    alignSelf: 'flex-start',
+  },
+  messagePressed: {
+    opacity: 0.9,
+  },
+  messageDeleting: {
+    opacity: 0.5,
   },
   messageBubble: {
     padding: 12,
@@ -376,12 +568,10 @@ const styles = StyleSheet.create({
   },
   myMessage: {
     backgroundColor: '#007AFF',
-    alignSelf: 'flex-end',
     borderBottomRightRadius: 4,
   },
   otherMessage: {
     backgroundColor: '#E5E5EA',
-    alignSelf: 'flex-start',
     borderBottomLeftRadius: 4,
   },
   timeText: {
@@ -392,7 +582,7 @@ const styles = StyleSheet.create({
   emptyContainer: {
     alignItems: 'center',
     paddingVertical: 60,
-    transform: [{ scaleY: -1 }], // Flip because list is inverted
+    transform: [{ scaleY: -1 }],
   },
   emptyText: {
     marginTop: 12,
@@ -408,17 +598,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-end',
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingTop: 8,
     borderTopWidth: 1,
   },
   input: {
     flex: 1,
     borderRadius: 20,
     paddingHorizontal: 16,
-    paddingVertical: 10,
+    paddingTop: 10,
+    paddingBottom: 10,
     marginRight: 8,
+    minHeight: 40,
     maxHeight: 100,
     fontSize: 15,
+    lineHeight: 18,
   },
   sendButton: {
     width: 40,
@@ -426,6 +619,7 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     justifyContent: 'center',
     alignItems: 'center',
+    marginBottom: 2,
   },
   menuButton: {
     padding: 8,
@@ -436,7 +630,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.25)',
     justifyContent: 'flex-start',
     alignItems: 'flex-end',
-    paddingTop: 72,
     paddingRight: 12,
   },
   menuCard: {
@@ -459,6 +652,34 @@ const styles = StyleSheet.create({
   },
   menuItemTextDanger: {
     fontSize: 15,
+    fontWeight: '600',
+    color: '#FF3B30',
+  },
+  messageMenuOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    justifyContent: 'flex-end',
+    paddingHorizontal: 16,
+    paddingBottom: 24,
+  },
+  messageMenuCard: {
+    borderRadius: 16,
+    overflow: 'hidden',
+    elevation: 8,
+  },
+  messageMenuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+  },
+  messageMenuText: {
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  messageMenuDanger: {
+    fontSize: 16,
     fontWeight: '600',
     color: '#FF3B30',
   },

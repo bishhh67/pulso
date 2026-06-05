@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { View, StyleSheet, FlatList, Image, Pressable, ActivityIndicator } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { auth } from '../../services/supabase/auth';
 import { listDirectChatSummaries } from '../../services/supabase/data';
@@ -34,6 +34,12 @@ export default function DirectMessages() {
       setLoading(false);
     }
   }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      void loadThreads();
+    }, [loadThreads])
+  );
 
   useEffect(() => {
     void loadThreads();
