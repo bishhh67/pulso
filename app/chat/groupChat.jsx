@@ -19,10 +19,9 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { auth } from '../../services/supabase/auth';
 import { supabase } from '../../services/supabase/client';
-import { listProfilesExcept, normalizeMessage } from '../../services/supabase/data';
+import { listProfilesExcept, normalizeMessage, createNotification } from '../../services/supabase/data';
 import {
   joinServer,
-  createNotification,
   getServerById,
   listServerChannels,
   createChannel,
@@ -36,7 +35,8 @@ import {
   transferServerOwnership,
   leaveOrKickFromServer,
   deleteServer,
-  getUserServerMember
+  getUserServerMember,
+  updateServer,
 } from '../../services/supabase/server';
 import { getFileUrl } from '../../src/storage/storageProvider';
 import ThemedView from '../../components/ThemedView';
@@ -81,6 +81,12 @@ export default function GroupChat() {
   const [memberRoleModalVisible, setMemberRoleModalVisible] = useState(false);
   const [selectedMember, setSelectedMember] = useState(null);
   const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
+
+  // Password management states
+  const [passwordModalVisible, setPasswordModalVisible] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [savingPassword, setSavingPassword] = useState(false);
 
   // Input states for creation/editing
   const [newChannelName, setNewChannelName] = useState('');
@@ -492,6 +498,40 @@ export default function GroupChat() {
     );
   };
 
+  // Password management handler
+  const handleSavePassword = async () => {
+    if (newPassword.trim() && newPassword !== confirmPassword) {
+      Alert.alert('Error', 'Passwords do not match.');
+      return;
+    }
+
+    setSavingPassword(true);
+    try {
+      // Pass empty string or null to remove password, otherwise set new password
+      await updateServer(serverId, { password: newPassword.trim() || null });
+      await loadServerData();
+      setPasswordModalVisible(false);
+      setNewPassword('');
+      setConfirmPassword('');
+
+      if (newPassword.trim()) {
+        Alert.alert('Success', 'Server password has been updated.');
+      } else {
+        Alert.alert('Success', 'Server password has been removed. The server is now public.');
+      }
+    } catch (error) {
+      console.error('Error updating server password:', error);
+      const msg = error?.message || '';
+      if (msg.toLowerCase().includes('only the server owner')) {
+        Alert.alert('Permission Denied', 'Only the server owner can change password settings.');
+      } else {
+        Alert.alert('Error', 'Failed to update server password.');
+      }
+    } finally {
+      setSavingPassword(false);
+    }
+  };
+
   const handleDeleteServer = () => {
     Alert.alert(
       'Delete Server',
@@ -789,6 +829,23 @@ export default function GroupChat() {
                   <Ionicons name="person-add-outline" size={20} color="#007AFF" />
                   <ThemedText style={styles.actionBtnText}>Invite User</ThemedText>
                 </ThemedButton>
+
+                {auth.currentUser.uid === serverData?.ownerId && (
+                  <ThemedButton
+                    style={[styles.actionBtnItem, { backgroundColor: theme.uiBackground }]}
+                    onPress={() => {
+                      setServerOptionsVisible(false);
+                      setNewPassword('');
+                      setConfirmPassword('');
+                      setPasswordModalVisible(true);
+                    }}
+                  >
+                    <Ionicons name={serverData?.hasPassword ? 'lock-closed' : 'lock-open-outline'} size={20} color="#FF9500" />
+                    <ThemedText style={styles.actionBtnText}>
+                      {serverData?.hasPassword ? 'Change Password' : 'Set Password'}
+                    </ThemedText>
+                  </ThemedButton>
+                )}
 
                 {auth.currentUser.uid === serverData?.ownerId ? (
                   <ThemedButton
@@ -1132,6 +1189,89 @@ export default function GroupChat() {
               >
                 <ThemedText>Close</ThemedText>
               </ThemedButton>
+            </View>
+          </View>
+        </Modal>
+
+        {/* Password Management Modal */}
+        <Modal
+          visible={passwordModalVisible}
+          transparent={true}
+          animationType="slide"
+          onRequestClose={() => {
+            setPasswordModalVisible(false);
+            setNewPassword('');
+            setConfirmPassword('');
+          }}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContent, { backgroundColor: theme.background }]}>
+              <View style={{ alignItems: 'center', marginBottom: 16 }}>
+                <Ionicons name="lock-closed" size={36} color="#FF9500" />
+                <ThemedText title style={[styles.modalTitle, { marginTop: 12 }]}>
+                  Password Settings
+                </ThemedText>
+                {serverData?.hasPassword && (
+                  <ThemedText style={{ fontSize: 12, opacity: 0.5, textAlign: 'center' }}>
+                    This server is currently password protected.
+                  </ThemedText>
+                )}
+              </View>
+
+              <TextInput
+                style={[styles.input, { backgroundColor: theme.uiBackground, color: theme.text, borderColor: theme.iconColor }]}
+                placeholder={serverData?.hasPassword ? 'New password (leave blank to remove)' : 'Set a password'}
+                placeholderTextColor={theme.iconColor}
+                value={newPassword}
+                onChangeText={setNewPassword}
+                secureTextEntry
+                maxLength={50}
+              />
+
+              {newPassword.trim().length > 0 && (
+                <TextInput
+                  style={[styles.input, { backgroundColor: theme.uiBackground, color: theme.text, borderColor: newPassword !== confirmPassword && confirmPassword.length > 0 ? '#FF3B30' : theme.iconColor }]}
+                  placeholder="Confirm password"
+                  placeholderTextColor={theme.iconColor}
+                  value={confirmPassword}
+                  onChangeText={setConfirmPassword}
+                  secureTextEntry
+                  maxLength={50}
+                />
+              )}
+
+              {newPassword !== confirmPassword && confirmPassword.length > 0 && (
+                <ThemedText style={{ color: '#FF3B30', fontSize: 12, marginBottom: 8, marginTop: -8 }}>
+                  Passwords do not match
+                </ThemedText>
+              )}
+
+              <View style={styles.modalButtons}>
+                <ThemedButton
+                  style={[styles.modalButton, { backgroundColor: theme.uiBackground }]}
+                  onPress={() => {
+                    setPasswordModalVisible(false);
+                    setNewPassword('');
+                    setConfirmPassword('');
+                  }}
+                >
+                  <ThemedText>Cancel</ThemedText>
+                </ThemedButton>
+
+                <ThemedButton
+                  style={[styles.modalButton, { backgroundColor: newPassword.trim() ? '#007AFF' : '#FF3B30' }]}
+                  onPress={handleSavePassword}
+                  disabled={savingPassword || (newPassword.trim().length > 0 && newPassword !== confirmPassword)}
+                >
+                  {savingPassword ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <ThemedText style={{ color: '#fff' }}>
+                      {newPassword.trim() ? 'Save Password' : serverData?.hasPassword ? 'Remove Password' : 'Cancel'}
+                    </ThemedText>
+                  )}
+                </ThemedButton>
+              </View>
             </View>
           </View>
         </Modal>

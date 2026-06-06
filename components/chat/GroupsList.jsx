@@ -3,7 +3,7 @@ import { View, StyleSheet, FlatList, Image, Pressable, ActivityIndicator, Modal,
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { auth } from '../../services/supabase/auth';
-import { listServersForUser, createServer, listAllServers, joinServer } from '../../services/supabase/server';
+import { listServersForUser, createServer, listAllServers, joinServer, joinServerWithPassword } from '../../services/supabase/server';
 import { getFileUrl } from '../../src/storage/storageProvider';
 import ThemedView from '../ThemedView';
 import ThemedText from '../ThemedText';
@@ -25,7 +25,17 @@ export default function GroupsList() {
   const [createModalVisible, setCreateModalVisible] = useState(false);
   const [serverName, setServerName] = useState('');
   const [serverDescription, setServerDescription] = useState('');
+  const [serverPassword, setServerPassword] = useState('');
+  const [showCreatePassword, setShowCreatePassword] = useState(false);
   const [creating, setCreating] = useState(false);
+
+  // Password prompt modal state
+  const [passwordModalVisible, setPasswordModalVisible] = useState(false);
+  const [passwordInput, setPasswordInput] = useState('');
+  const [showPasswordInput, setShowPasswordInput] = useState(false);
+  const [joiningServer, setJoiningServer] = useState(null);
+  const [joining, setJoining] = useState(false);
+  const [passwordError, setPasswordError] = useState('');
 
   const loadServers = useCallback(async () => {
     try {
@@ -69,12 +79,14 @@ export default function GroupsList() {
         description: serverDescription.trim(),
         image: null,
         ownerId: auth.currentUser.uid,
+        password: serverPassword.trim() || null,
       });
       
       Alert.alert('Success', 'Server created successfully!');
       setCreateModalVisible(false);
       setServerName('');
       setServerDescription('');
+      setServerPassword('');
       
       // Reload lists and navigate directly to the new server
       await loadServers();
@@ -99,30 +111,71 @@ export default function GroupsList() {
   };
 
   const handleJoinServer = async (server) => {
-    Alert.alert(
-      'Join Server',
-      `Are you sure you want to join "${server.name}"?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Join',
-          onPress: async () => {
-            try {
-              setLoading(true);
-              await joinServer(server.id, auth.currentUser.uid);
-              Alert.alert('Success', `You joined ${server.name}!`);
-              await loadServers();
-              handleServerPress(server);
-            } catch (error) {
-              console.error('Error joining server:', error);
-              Alert.alert('Error', 'Failed to join server');
-            } finally {
-              setLoading(false);
+    if (server.hasPassword) {
+      // Show password modal
+      setJoiningServer(server);
+      setPasswordInput('');
+      setPasswordError('');
+      setShowPasswordInput(false);
+      setPasswordModalVisible(true);
+    } else {
+      // Join directly (no password)
+      Alert.alert(
+        'Join Server',
+        `Are you sure you want to join "${server.name}"?`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Join',
+            onPress: async () => {
+              try {
+                setLoading(true);
+                await joinServerWithPassword(server.id, null);
+                Alert.alert('Success', `You joined ${server.name}!`);
+                await loadServers();
+                handleServerPress(server);
+              } catch (error) {
+                console.error('Error joining server:', error);
+                Alert.alert('Error', 'Failed to join server');
+              } finally {
+                setLoading(false);
+              }
             }
           }
-        }
-      ]
-    );
+        ]
+      );
+    }
+  };
+
+  const handlePasswordJoin = async () => {
+    if (!joiningServer) return;
+    if (!passwordInput.trim()) {
+      setPasswordError('Please enter the server password.');
+      return;
+    }
+
+    setJoining(true);
+    setPasswordError('');
+
+    try {
+      await joinServerWithPassword(joiningServer.id, passwordInput.trim());
+      setPasswordModalVisible(false);
+      setPasswordInput('');
+      setJoiningServer(null);
+      Alert.alert('Success', `You joined ${joiningServer.name}!`);
+      await loadServers();
+      handleServerPress(joiningServer);
+    } catch (error) {
+      console.error('Error joining server with password:', error);
+      const msg = error?.message || '';
+      if (msg.toLowerCase().includes('incorrect password')) {
+        setPasswordError('Incorrect password. Please try again.');
+      } else {
+        setPasswordError('Failed to join server. Please try again.');
+      }
+    } finally {
+      setJoining(false);
+    }
   };
 
   // Filter display lists based on search query
@@ -217,7 +270,12 @@ export default function GroupsList() {
             </View>
 
             <View style={styles.serverInfo}>
-              <ThemedText style={styles.serverName}>{item.name}</ThemedText>
+              <View style={styles.serverNameRow}>
+                <ThemedText style={styles.serverName} numberOfLines={1}>{item.name}</ThemedText>
+                {item.hasPassword && activeTab === 'discover' && (
+                  <Ionicons name="lock-closed" size={14} color="#FF9500" style={{ marginLeft: 6 }} />
+                )}
+              </View>
               <ThemedText style={styles.serverDescription} numberOfLines={2}>
                 {item.description || 'No description provided.'}
               </ThemedText>
@@ -226,7 +284,10 @@ export default function GroupsList() {
             {activeTab === 'mine' ? (
               <Ionicons name="chevron-forward" size={20} color={theme.iconColor} />
             ) : (
-              <View style={styles.joinBadge}>
+              <View style={[styles.joinBadge, item.hasPassword && styles.joinBadgeLocked]}>
+                {item.hasPassword && (
+                  <Ionicons name="lock-closed" size={12} color="#fff" style={{ marginRight: 4 }} />
+                )}
                 <ThemedText style={styles.joinText}>Join</ThemedText>
               </View>
             )}
@@ -284,6 +345,42 @@ export default function GroupsList() {
               maxLength={200}
             />
 
+            {/* Password Section */}
+            <View style={styles.passwordSection}>
+              <Pressable
+                style={styles.passwordToggleRow}
+                onPress={() => {
+                  setShowCreatePassword(!showCreatePassword);
+                  if (showCreatePassword) setServerPassword('');
+                }}
+              >
+                <Ionicons
+                  name={showCreatePassword ? 'lock-closed' : 'lock-open-outline'}
+                  size={20}
+                  color={showCreatePassword ? '#FF9500' : theme.iconColor}
+                />
+                <ThemedText style={styles.passwordToggleText}>
+                  {showCreatePassword ? 'Password Protected' : 'Add Password (Optional)'}
+                </ThemedText>
+                <Ionicons
+                  name={showCreatePassword ? 'chevron-up' : 'chevron-down'}
+                  size={16}
+                  color={theme.iconColor}
+                />
+              </Pressable>
+              {showCreatePassword && (
+                <TextInput
+                  style={[styles.input, { backgroundColor: theme.uiBackground, color: theme.text, borderColor: theme.iconColor, marginTop: 8 }]}
+                  placeholder="Enter server password"
+                  placeholderTextColor={theme.iconColor}
+                  value={serverPassword}
+                  onChangeText={setServerPassword}
+                  secureTextEntry
+                  maxLength={50}
+                />
+              )}
+            </View>
+
             <View style={styles.modalButtons}>
               <ThemedButton
                 style={[styles.modalButton, { backgroundColor: theme.uiBackground }]}
@@ -291,6 +388,8 @@ export default function GroupsList() {
                   setCreateModalVisible(false);
                   setServerName('');
                   setServerDescription('');
+                  setServerPassword('');
+                  setShowCreatePassword(false);
                 }}
               >
                 <ThemedText>Cancel</ThemedText>
@@ -305,6 +404,87 @@ export default function GroupsList() {
                   <ActivityIndicator size="small" color="#fff" />
                 ) : (
                   <ThemedText style={{ color: '#fff' }}>Create</ThemedText>
+                )}
+              </ThemedButton>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Password Prompt Modal */}
+      <Modal
+        visible={passwordModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => {
+          setPasswordModalVisible(false);
+          setPasswordInput('');
+          setJoiningServer(null);
+          setPasswordError('');
+        }}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: theme.background }]}>
+            <View style={styles.passwordModalHeader}>
+              <Ionicons name="lock-closed" size={36} color="#FF9500" />
+              <ThemedText title style={[styles.modalTitle, { marginTop: 12 }]}>
+                Password Required
+              </ThemedText>
+              <ThemedText style={styles.passwordModalSubtitle}>
+                "{joiningServer?.name}" is password protected. Enter the password to join.
+              </ThemedText>
+            </View>
+
+            <View style={styles.passwordInputRow}>
+              <TextInput
+                style={[styles.input, styles.passwordInputField, { backgroundColor: theme.uiBackground, color: theme.text, borderColor: passwordError ? '#FF3B30' : theme.iconColor }]}
+                placeholder="Enter server password"
+                placeholderTextColor={theme.iconColor}
+                value={passwordInput}
+                onChangeText={(val) => {
+                  setPasswordInput(val);
+                  if (passwordError) setPasswordError('');
+                }}
+                secureTextEntry={!showPasswordInput}
+                autoFocus
+              />
+              <Pressable
+                style={styles.eyeButton}
+                onPress={() => setShowPasswordInput(!showPasswordInput)}
+              >
+                <Ionicons name={showPasswordInput ? 'eye-off' : 'eye'} size={22} color={theme.iconColor} />
+              </Pressable>
+            </View>
+
+            {passwordError ? (
+              <View style={styles.errorRow}>
+                <Ionicons name="alert-circle" size={16} color="#FF3B30" />
+                <ThemedText style={styles.errorText}>{passwordError}</ThemedText>
+              </View>
+            ) : null}
+
+            <View style={styles.modalButtons}>
+              <ThemedButton
+                style={[styles.modalButton, { backgroundColor: theme.uiBackground }]}
+                onPress={() => {
+                  setPasswordModalVisible(false);
+                  setPasswordInput('');
+                  setJoiningServer(null);
+                  setPasswordError('');
+                }}
+              >
+                <ThemedText>Cancel</ThemedText>
+              </ThemedButton>
+
+              <ThemedButton
+                style={[styles.modalButton, { backgroundColor: '#007AFF' }]}
+                onPress={handlePasswordJoin}
+                disabled={joining}
+              >
+                {joining ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <ThemedText style={{ color: '#fff' }}>Join</ThemedText>
                 )}
               </ThemedButton>
             </View>
@@ -386,10 +566,15 @@ const styles = StyleSheet.create({
     flex: 1,
     marginRight: 8,
   },
+  serverNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
   serverName: {
     fontSize: 16,
     fontWeight: '600',
     marginBottom: 2,
+    flexShrink: 1,
   },
   serverDescription: {
     fontSize: 13,
@@ -400,6 +585,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 6,
     borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  joinBadgeLocked: {
+    backgroundColor: '#FF9500',
   },
   joinText: {
     color: '#fff',
@@ -466,6 +656,20 @@ const styles = StyleSheet.create({
     height: 100,
     textAlignVertical: 'top',
   },
+  passwordSection: {
+    marginBottom: 16,
+  },
+  passwordToggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 8,
+  },
+  passwordToggleText: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '600',
+  },
   modalButtons: {
     flexDirection: 'row',
     gap: 12,
@@ -476,5 +680,42 @@ const styles = StyleSheet.create({
     padding: 14,
     borderRadius: 12,
     alignItems: 'center',
+  },
+  // Password prompt modal styles
+  passwordModalHeader: {
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  passwordModalSubtitle: {
+    fontSize: 13,
+    opacity: 0.6,
+    textAlign: 'center',
+    marginTop: 4,
+    marginBottom: 8,
+  },
+  passwordInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  passwordInputField: {
+    flex: 1,
+    marginRight: 0,
+  },
+  eyeButton: {
+    position: 'absolute',
+    right: 14,
+    top: 14,
+  },
+  errorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 8,
+    marginTop: -8,
+  },
+  errorText: {
+    color: '#FF3B30',
+    fontSize: 13,
+    fontWeight: '500',
   },
 });

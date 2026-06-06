@@ -24,6 +24,7 @@ export const normalizeServer = (row) => {
     imagePath: row.image || null,
     ownerId: row.owner_id,
     createdAt: isoTimestamp(row.created_at),
+    hasPassword: row.password_hash !== null && row.password_hash !== undefined && row.password_hash !== '',
   };
 };
 
@@ -65,6 +66,7 @@ export async function createServer(server) {
       description: server.description || '',
       image: server.imagePath ?? server.image ?? null,
       owner_id: server.ownerId,
+      password_hash: server.password || null,
     })
     .select('*')
     .single();
@@ -116,6 +118,7 @@ export async function updateServer(serverId, patch) {
   if (patch.name !== undefined) payload.name = patch.name;
   if (patch.description !== undefined) payload.description = patch.description;
   if (patch.image !== undefined) payload.image = patch.image;
+  if (patch.password !== undefined) payload.password_hash = patch.password || null;
 
   const { data, error } = await supabase
     .from('servers')
@@ -155,7 +158,29 @@ export async function joinServer(serverId, userId) {
   return normalizeServerMember(data);
 }
 
+// Join a server using a password (calls the RPC database function)
+export async function joinServerWithPassword(serverId, password) {
+  const { data, error } = await supabase.rpc('join_server_with_password', {
+    p_server_id: serverId,
+    p_password: password || null,
+  });
+
+  if (error) throw error;
+  return data;
+}
+
 // Leave or kick user from server
+export async function leaveOrKickFromServer(serverId, userId) {
+  const { error } = await supabase
+    .from('server_members')
+    .delete()
+    .eq('server_id', serverId)
+    .eq('user_id', userId);
+
+  if (error) throw error;
+  return true;
+}
+
 // Accept server invitation (join server)
 // This function is used when a user accepts a server‑invite notification.
 export async function acceptServerInvite(serverId, userId) {

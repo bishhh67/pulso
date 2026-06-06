@@ -291,7 +291,7 @@ export default function PostCard({ post, onCommentPress, onPostPress }) {
 
   const formatTimestamp = (timestamp) => {
     if (!timestamp) return 'Just now';
-    
+
     const now = new Date();
     const postDate = timestamp?.toDate ? timestamp.toDate() : new Date(timestamp);
     if (Number.isNaN(postDate.getTime())) return 'Just now';
@@ -308,7 +308,7 @@ export default function PostCard({ post, onCommentPress, onPostPress }) {
   };
 
   return (
-    <Pressable 
+    <Pressable
       style={[styles.container, { borderBottomColor: theme.iconColor }]}
       onPress={() => onPostPress && onPostPress(post)}
     >
@@ -316,15 +316,15 @@ export default function PostCard({ post, onCommentPress, onPostPress }) {
       <Pressable style={styles.header} onPress={handleAuthorPress}>
         <View style={[styles.avatar, { backgroundColor: theme.uiBackground }]}>
           {authorData?.profilePhoto || authorData?.image ? (
-            <Image 
-              source={{ uri: getFileUrl(authorData.profilePhotoPath || authorData.profilePhoto || authorData.imagePath || authorData.image) }} 
+            <Image
+              source={{ uri: getFileUrl(authorData.profilePhotoPath || authorData.profilePhoto || authorData.imagePath || authorData.image) }}
               style={styles.avatarImage}
             />
           ) : (
-            <Ionicons 
-              name={post.authorType === 'user' ? 'person' : 'people'} 
-              size={20} 
-              color={theme.iconColor} 
+            <Ionicons
+              name={post.authorType === 'user' ? 'person' : 'people'}
+              size={20}
+              color={theme.iconColor}
             />
           )}
         </View>
@@ -360,16 +360,16 @@ export default function PostCard({ post, onCommentPress, onPostPress }) {
           e.stopPropagation();
           handleLike();
         }} style={styles.actionButton}>
-          <Ionicons 
-            name={liked ? 'heart' : 'heart-outline'} 
-            size={24} 
-            color={liked ? '#FF3B30' : theme.iconColor} 
+          <Ionicons
+            name={liked ? 'heart' : 'heart-outline'}
+            size={24}
+            color={liked ? '#FF3B30' : theme.iconColor}
           />
           <ThemedText style={styles.actionText}>{likes.length}</ThemedText>
         </Pressable>
 
         {/* Comment */}
-        <Pressable 
+        <Pressable
           onPress={(e) => {
             e.stopPropagation();
             onCommentPress(post);
@@ -383,7 +383,7 @@ export default function PostCard({ post, onCommentPress, onPostPress }) {
         </Pressable>
 
         {/* Share */}
-        <Pressable 
+        <Pressable
           onPress={(e) => {
             e.stopPropagation();
             handleShare();

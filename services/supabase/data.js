@@ -498,6 +498,7 @@ export async function createNotification(notification) {
     from_user_photo: notification.fromUserPhoto || notification.fromUserPhotoPath || null,
     post_id: notification.postId || null,
     friend_request_id: notification.friendRequestId || null,
+    server_id: notification.serverId || null,
     read: notification.read || false,
   };
 
@@ -879,6 +880,42 @@ export async function listFeedPosts(currentUserId, limitCount = 50) {
     .limit(limitCount);
   if (error) throw error;
   return (data || []).map(normalizePost);
+}
+
+export async function getFeedPosts(uid, lastScore = null, lastId = null, limitCount = 10) {
+  if (!uid) return [];
+  const { data, error } = await supabase.rpc('get_feed', {
+    uid,
+    last_score: lastScore,
+    last_id: lastId,
+    limit_count: limitCount
+  });
+  if (error) throw error;
+  return (data || []).map((row) => {
+    const post = normalizePost(row);
+    if (post) {
+      post.feedScore = row.feed_score;
+    }
+    return post;
+  });
+}
+
+export async function batchRecordViews(uid, postIds) {
+  if (!uid || !postIds || postIds.length === 0) return;
+  const payload = postIds.map((postId) => ({
+    user_id: uid,
+    post_id: postId,
+    viewed_at: new Date().toISOString()
+  }));
+
+  const { error } = await supabase
+    .from('user_post_views')
+    .upsert(payload, { onConflict: 'user_id,post_id', ignoreDuplicates: true });
+
+  if (error) {
+    console.error('Error batch recording post views:', error);
+    throw error;
+  }
 }
 
 export async function listRecentPosts(limitCount = 50) {
